@@ -17,6 +17,8 @@ for _d in (RAW_STATSAPI, RAW_STATCAST, RAW_SAVANT, PROCESSED):
 # Verified from https://statsapi.mlb.com/api/v1/seasons?sportId=1&season=2026
 SEASONS = {
     (2026, 1): {"start": "2026-03-25", "end": "2026-09-27", "game_type": "R", "label": "mlb_2026"},
+    # 2025 MLB had no ABS; Statcast only, for year-over-year chase change.
+    (2025, 1): {"start": "2025-03-27", "end": "2025-09-28", "game_type": "R", "label": "mlb_2025"},
     # Triple-A 2025 (sportId 11). Challenge events exist but omit the initiating player.
     (2025, 11): {"start": "2025-03-28", "end": "2025-09-21", "game_type": "R", "label": "aaa_2025"},
 }

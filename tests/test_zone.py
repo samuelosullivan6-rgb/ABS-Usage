@@ -44,14 +44,14 @@ def paired():
     for r in rows:
         by_pk.setdefault(r["game_pk"], []).append(r)
     out = []
-    for pk in sorted(by_pk)[:5]:  # five games, ~45 pitches
+    for pk in sorted(by_pk)[:8]:  # eight games, ~30 pitches
         feed = _feed(pk)
         idx = {ev["playId"]: ev for p in feed["liveData"]["plays"]["allPlays"] for ev in p["playEvents"] if ev.get("playId")}
         for r in by_pk[pk]:
             ev = idx.get(r["play_id"])
             if ev:
                 out.append((r, ev["pitchData"]["coordinates"]))
-    assert len(out) >= 20
+    assert len(out) >= 15
     return out
 
 

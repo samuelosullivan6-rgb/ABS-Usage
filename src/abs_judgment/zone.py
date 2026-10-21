@@ -66,3 +66,26 @@ def abs_is_strike(x: float, z: float, top: float, bot: float) -> bool:
 def implied_height_in(top: float, bot: float) -> float:
     """Measured height implied by the ABS bounds (average of the two)."""
     return 12 * (top / ABS_TOP_FRAC + bot / ABS_BOT_FRAC) / 2
+
+
+# --------------------------------------------------------------------------- #
+# Vectorised versions for the pitch table (numpy / pandas columns)
+# --------------------------------------------------------------------------- #
+def midplate_location_np(x0, y0, z0, vx0, vy0, vz0, ax, ay, az, y_target: float = PLATE_MID_Y):
+    import numpy as np
+
+    disc = vy0 * vy0 - 2.0 * ay * (y0 - y_target)
+    t = (-vy0 - np.sqrt(disc)) / ay
+    x = x0 + vx0 * t + 0.5 * ax * t * t
+    z = z0 + vz0 * t + 0.5 * az * t * t
+    return x, z
+
+
+def edge_distance_in_np(x, z, top, bot):
+    import numpy as np
+
+    dx = np.abs(x) - ZONE_HALF_WIDTH
+    dz = np.maximum(bot - z, z - top)
+    inside = (dx <= 0) & (dz <= 0)
+    center = np.where(inside, np.maximum(dx, dz), np.hypot(np.maximum(dx, 0.0), np.maximum(dz, 0.0)))
+    return center * 12 - BALL_RADIUS_IN

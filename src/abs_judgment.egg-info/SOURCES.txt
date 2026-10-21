@@ -9,3 +9,4 @@ src/abs_judgment.egg-info/SOURCES.txt
 src/abs_judgment.egg-info/dependency_links.txt
 src/abs_judgment.egg-info/requires.txt
 src/abs_judgment.egg-info/top_level.txt
+tests/test_zone.py

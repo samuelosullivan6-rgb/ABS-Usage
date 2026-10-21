@@ -54,8 +54,8 @@ def main() -> None:
     rep: list[str] = [f"# build report {label}"]
 
     games = pd.read_csv(PROCESSED / f"games_{label}.csv")
-    pks = [int(pk) for pk in games.game_pk if feed_path(int(pk)).exists()]
-    rep.append(f"games listed {len(games)}, feeds cached {len(pks)}")
+    pks = sorted({int(pk) for pk in games.game_pk if feed_path(int(pk)).exists()})
+    rep.append(f"games listed {len(games)} ({games.game_pk.nunique()} unique; suspended games repeat), feeds cached {len(pks)}")
 
     P, C, S = [], [], []
     for pitches, challenges, summary in extract_many(pks):
@@ -86,11 +86,13 @@ def main() -> None:
     rep.append(f"pitches with full trajectory: {has_traj.mean():.4f}")
     t = pt[has_traj]
     mx, mz = midplate_location_np(*(t[c].to_numpy(float) for c in ["x0", "y0", "z0", "vx0", "vy0", "vz0", "ax", "ay", "az"]))
+    for col in ("mid_x", "mid_z", "abs_edge_in"):
+        pt[col] = np.nan
     pt.loc[has_traj, "mid_x"] = mx
     pt.loc[has_traj, "mid_z"] = mz
     pt.loc[has_traj, "abs_edge_in"] = edge_distance_in_np(mx, mz, t.sz_top.to_numpy(float), t.sz_bot.to_numpy(float))
-    pt["abs_strike"] = pt.abs_edge_in <= 0
-    pt.loc[pt.abs_edge_in.isna(), "abs_strike"] = np.nan
+    # nullable boolean: True/False where geometry exists, <NA> otherwise
+    pt["abs_strike"] = pd.array(np.where(pt.abs_edge_in.isna(), pd.NA, pt.abs_edge_in <= 0), dtype="boolean")
 
     # Validation: ABS outcome on challenged pitches should match the geometry
     chal = pt[pt.challenged & pt.abs_edge_in.notna()].copy()
@@ -113,6 +115,10 @@ def main() -> None:
                                 "pitch_type": "sc_pitch_type", "plate_x": "sc_plate_x", "plate_z": "sc_plate_z"})
         key = ["game_pk", "at_bat_number", "pitch_number"]
         sc = sc.drop_duplicates(key)
+        dup = pt.duplicated(key).sum()
+        if dup:
+            rep.append(f"WARNING: {dup} duplicate pitch keys in feed table; keeping first")
+            pt = pt.drop_duplicates(key, keep="first")
         before = len(pt)
         pt = pt.merge(sc, on=key, how="left", validate="one_to_one")
         joined = pt.description.notna().mean()
@@ -142,8 +148,8 @@ def main() -> None:
     # original umpire call (pre-challenge)
     pt["orig_called_strike"] = ((pt.call_code == "C") & ~pt.challenged) | pt.batter_challenged
     pt["orig_called_ball"] = (pt.is_ball.astype("boolean").fillna(False) & ~pt.challenged) | pt.fielder_challenged
-    pt["is_chase"] = pt.is_swing & (pt.abs_strike == False)  # noqa: E712
-    pt["is_zone_swing"] = pt.is_swing & (pt.abs_strike == True)  # noqa: E712
+    pt["is_chase"] = pt.is_swing & (pt.abs_edge_in > 0)
+    pt["is_zone_swing"] = pt.is_swing & (pt.abs_edge_in <= 0)
 
     pt.to_parquet(PROCESSED / f"pitch_table_{label}.parquet", index=False)
     ch.to_parquet(PROCESSED / f"challenges_{label}.parquet", index=False)

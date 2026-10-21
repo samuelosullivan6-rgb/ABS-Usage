@@ -106,13 +106,12 @@ def token_value_dp(opps: pd.DataFrame, lam_per_half: float, k_max: int = 2,
     P = opps[p_col].to_numpy(float)
     S = opps[s_col].to_numpy(float)
     V = np.zeros((k_max + 1, T + 1))
-    thr = np.full((k_max + 1, T + 1), np.nan)
+
     for t in range(T - 1, -1, -1):
         for k in range(1, k_max + 1):
             v_keep = V[k, t + 1]
             v_lose = V[k - 1, t + 1]
             dV = v_keep - v_lose
-            thr[k, t] = dV / (S + dV + 1e-12)  # vector over opportunities; store mean threshold at s=median
             gain = P * (S + v_keep) + (1 - P) * v_lose
             best = np.maximum(v_keep, gain)
             V[k, t] = (1 - q) * v_keep + q * best.mean()

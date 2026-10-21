@@ -35,7 +35,8 @@ def hitter_season(pt: pd.DataFrame, min_pitches: int = 500) -> pd.DataFrame:
     p["ts_chase"] = p.two_strike & p.is_chase
     p["ts_inplay"] = p.two_strike & p.is_in_play.astype("boolean").fillna(False)
     p["ts_dre"] = np.where(p.two_strike & p.is_swing, p.delta_run_exp, np.nan) if "delta_run_exp" in p.columns else np.nan
-    p["abs_ball_seen"] = p.abs_strike == False  # noqa: E712
+    p["abs_ball_seen"] = p.abs_edge_in > 0
+    p["abs_zone_seen"] = p.abs_edge_in <= 0
     p["take_abs_ball"] = p.is_take & p.abs_ball_seen
     p["lt2_chase"] = ~p.two_strike & p.is_chase
     p["lt2_abs_ball"] = ~p.two_strike & p.abs_ball_seen
@@ -58,7 +59,7 @@ def hitter_season(pt: pd.DataFrame, min_pitches: int = 500) -> pd.DataFrame:
         "abs_balls_seen": g.abs_ball_seen.sum(),
         "chases": g.is_chase.sum(),
         "zone_swings": g.is_zone_swing.sum(),
-        "zone_pitches": g.abs_strike.apply(lambda s: int((s == True).sum())),  # noqa: E712
+        "zone_pitches": g.abs_zone_seen.sum(),
         "chase_whiffs": g.chase_whiff.sum(),
         "chase_contacts": g.chase_contact.sum(),
         "chase_dre_mean": g.chase_dre.mean(),

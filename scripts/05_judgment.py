@@ -76,9 +76,12 @@ def main() -> None:
     m12 = R1.merge(R2, on="batter_id", suffixes=("_1", "_2"))
     r_crit = m12[["criterion_z_1", "criterion_z_2"]].corr().iloc[0, 1]
     rel = {"judgment_z": st["spearman_brown_full"], "d_prime": 2 * r_dprime / (1 + r_dprime), "criterion_z": 2 * r_crit / (1 + r_crit)}
+    # average fixed-effect contribution, so a marginal league curve can be drawn at a + offset + b * edge
+    fixed_offset = float(sum(d[k].mean() * v for k, v in prior["fixed"].items()))
     with open(PROCESSED / f"judgment_prior_{a.label}.json", "w") as f:
         json.dump({"mean": prior["mean"].tolist(), "var": prior["var"].tolist(),
-                   "fixed": prior["fixed"], "n_hitters": prior["n_hitters"], "reliability_full_season": rel}, f, indent=1)
+                   "fixed": prior["fixed"], "fixed_offset_mean": fixed_offset,
+                   "n_hitters": prior["n_hitters"], "reliability_full_season": rel}, f, indent=1)
     print(f"\nsplit-half reliability (Spearman-Brown to full season): judgment_z {rel['judgment_z']:.3f} "
           f"(raw r={st['r']:.3f}, n={st['n']}), d_prime {rel['d_prime']:.3f}, criterion_z {rel['criterion_z']:.3f}")
     print(f"corr(judgment_z, d_prime) = {J[['judgment_z', 'd_prime']].corr().iloc[0, 1]:.3f}; "

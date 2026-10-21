@@ -6,3 +6,4 @@ scipy
 statsmodels
 pytest
 tqdm
+matplotlib

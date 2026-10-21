@@ -69,8 +69,18 @@ def main() -> None:
     R1, _ = fit_hierarchical(d[d.game_date < mid], min_decisions=max(30, a.min_decisions // 2))
     R2, _ = fit_hierarchical(d[d.game_date >= mid], min_decisions=max(30, a.min_decisions // 2))
     st = judgment_stability(R1, R2, min_decisions=max(30, a.min_decisions // 2))
-    print(f"\nsplit-half reliability of judgment_z: n={st['n']}, r={st['r']:.3f}, "
-          f"Spearman-Brown full-season={st['spearman_brown_full']:.3f}")
+    S1 = sdt_metrics(d[d.game_date < mid], min_decisions=max(30, a.min_decisions // 2))
+    S2 = sdt_metrics(d[d.game_date >= mid], min_decisions=max(30, a.min_decisions // 2))
+    sd = S1.merge(S2, on="batter_id", suffixes=("_1", "_2"))
+    r_dprime = sd[["d_prime_1", "d_prime_2"]].corr().iloc[0, 1]
+    m12 = R1.merge(R2, on="batter_id", suffixes=("_1", "_2"))
+    r_crit = m12[["criterion_z_1", "criterion_z_2"]].corr().iloc[0, 1]
+    rel = {"judgment_z": st["spearman_brown_full"], "d_prime": 2 * r_dprime / (1 + r_dprime), "criterion_z": 2 * r_crit / (1 + r_crit)}
+    with open(PROCESSED / f"judgment_prior_{a.label}.json", "w") as f:
+        json.dump({"mean": prior["mean"].tolist(), "var": prior["var"].tolist(),
+                   "fixed": prior["fixed"], "n_hitters": prior["n_hitters"], "reliability_full_season": rel}, f, indent=1)
+    print(f"\nsplit-half reliability (Spearman-Brown to full season): judgment_z {rel['judgment_z']:.3f} "
+          f"(raw r={st['r']:.3f}, n={st['n']}), d_prime {rel['d_prime']:.3f}, criterion_z {rel['criterion_z']:.3f}")
     print(f"corr(judgment_z, d_prime) = {J[['judgment_z', 'd_prime']].corr().iloc[0, 1]:.3f}; "
           f"corr(judgment_z, criterion_z) = {J[['judgment_z', 'criterion_z']].corr().iloc[0, 1]:.3f}")
 

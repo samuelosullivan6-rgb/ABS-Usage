@@ -142,6 +142,63 @@ def savant_static_threshold(stake: np.ndarray, token_runs: float = 0.2) -> np.nd
     return token_runs / (token_runs + stake)
 
 
+def dynamic_threshold(V: np.ndarray, k: int, t: int, stake: float) -> float:
+    k = min(max(k, 1), V.shape[0] - 1)
+    t = min(t, V.shape[1] - 2)
+    dV = V[k, t + 1] - V[k - 1, t + 1]
+    return dV / (stake + dV) if stake + dV > 0 else 1.0
+
+
+def simulate_policy(opps: pd.DataFrame, rule: str, V: np.ndarray | None = None, slots: int = SLOTS_PER_HALF,
+                    token_runs: float = 0.2, extras_topup: bool = True) -> dict:
+    """Play every game forward with a challenge rule, tracking tokens.
+
+    opps must be sorted by game and pitch order and carry: game_pk, home_id,
+    away_id, team (the side that could challenge), inning, half, p (subjective
+    overturn probability from the perceived edge), true_flip (ABS would flip),
+    stake (runs). rule in {"static", "dynamic", "never", "oracle"}.
+    Returns realized runs, challenges, tokens lost, and per-team-game stats.
+    """
+    runs = 0.0
+    n_chal = 0
+    n_flip = 0
+    for pk, g in opps.groupby("game_pk", sort=False):
+        home, away = int(g.home_id.iloc[0]), int(g.away_id.iloc[0])
+        tokens = {home: 2, away: 2}
+        last_inning = 0
+        for r in g.itertuples(index=False):
+            if extras_topup and r.inning >= 10 and r.inning != last_inning:
+                last_inning = r.inning
+                for tm in (home, away):
+                    if tokens[tm] == 0:
+                        tokens[tm] = 1
+            tm = int(r.team)
+            if tokens[tm] == 0:
+                continue
+            if rule == "never":
+                continue
+            if rule == "oracle":
+                go = bool(r.true_flip)
+            else:
+                h = (r.inning - 1) * 2 + (1 if r.half == "bottom" else 0)
+                t = h * slots
+                thr = (token_runs / (token_runs + r.stake)) if rule == "static" else dynamic_threshold(V, tokens[tm], t, r.stake)
+                go = r.p >= thr
+            if not go:
+                continue
+            n_chal += 1
+            if r.true_flip:
+                runs += r.stake
+                n_flip += 1
+            else:
+                tokens[tm] -= 1
+    n_games = opps.game_pk.nunique()
+    return {"rule": rule, "runs": runs, "challenges": n_chal, "overturned": n_flip,
+            "runs_per_team_162": runs / (2 * n_games) * 162,
+            "challenges_per_team_game": n_chal / (2 * n_games),
+            "overturn_rate": n_flip / n_chal if n_chal else np.nan}
+
+
 def replay(challenge_rows: pd.DataFrame, V: np.ndarray, slots: int = SLOTS_PER_HALF) -> pd.DataFrame:
     """For each observed challenge, compare the decision under the static and
     dynamic rules and the realized run value. Requires columns: p, stake,

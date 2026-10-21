@@ -48,12 +48,19 @@ def main() -> None:
     res, strata = run_all(df)
     res["label"] = res.outcome.map(lambda o: OUTCOMES[o][1])
     res["beta_in_sd"] = res.beta_judgment / res.sd_outcome
+    import json
+    rel = json.load(open(PROCESSED / f"judgment_prior_{a.label}.json")).get("reliability_full_season", {}).get("judgment_z")
+    if rel and rel > 0:
+        res["beta_in_sd_disattenuated"] = res.beta_in_sd / rel
+        print(f"judgment_z full-season reliability {rel:.3f}: disattenuated effects = raw / {rel:.3f}")
     res.to_csv(PROCESSED / f"eyes_vs_approach_{a.label}.csv", index=False)
     pd.concat([s.assign(outcome=o) for o, s in strata.items()]).to_csv(PROCESSED / f"eyes_vs_approach_strata_{a.label}.csv", index=False)
 
     print("\nEffect of +1 SD judgment (sharper eyes), holding chase-rate quintile, criterion, bat speed and side fixed:")
-    print(res[["outcome", "n", "beta_judgment", "se_hc1", "p_hc1", "boot_lo", "boot_hi", "beta_in_sd", "delta_r2"]]
-          .to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    cols = ["outcome", "n", "beta_judgment", "se_hc1", "p_hc1", "boot_lo", "boot_hi", "beta_in_sd", "delta_r2"]
+    if "beta_in_sd_disattenuated" in res.columns:
+        cols.append("beta_in_sd_disattenuated")
+    print(res[cols].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
     print("\nWithin chase-rate quintile, high-judgment minus low-judgment tercile:")
     for o, s in strata.items():
         print(f"  {o}: " + ", ".join(f"Q{int(r.chase_q) + 1} {r.high_minus_low:+.4f}" for r in s.itertuples()))

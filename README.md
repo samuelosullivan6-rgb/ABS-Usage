@@ -130,9 +130,23 @@ Sample: 219 hitters with 60+ decisions, 8+ challenges and 150+ PA.
 | Strikeout rate | −0.002 | 0.006 | 0.70 | −0.13 |
 | Two-strike chase rate | +0.006 | 0.005 | 0.27 | +0.27 |
 
-None is distinguishable from zero, and the within-quintile contrasts change sign across quintiles. The one with a nonzero point estimate, run value per chase, points the wrong way for the hypothesis (sharper eyes, costlier chases), and its disattenuated size is still within noise. The year-over-year chase-improvement outcome is reported below once the 2025 Statcast pull completes.
+None is distinguishable from zero, and the within-quintile contrasts change sign across quintiles. The one with a nonzero point estimate, run value per chase, points the wrong way for the hypothesis (sharper eyes, costlier chases), and its disattenuated size is still within noise.
 
-**Reading.** Among hitters who chase the same amount, the ones with sharper challenge judgment do not chase more cheaply, make more two-strike contact, or strike out less. The eyes-versus-approach split as measured here predicts *whether* a hitter chases, not *what happens* when they do. Two interpretations fit, and the data cannot yet separate them: perception on takes near the edge is a different skill from perception on the pitches hitters actually chase, which are further off the plate; or the per-hitter score is too unreliable in one season (0.27) to detect effects of the size that would matter, and the 2027 season doubles the sample. The null is a conservative null, not proof of absence.
+**Restricting to frequent challengers, where the score is reliable.** With 15 or more challenges (102 hitters), the judgment-chase correlation strengthens to −0.31 and the criterion-chase correlation to +0.26, as better measurement should produce. The conditional effects stay null:
+
+| Outcome (15+ challenges, n = 102) | Effect per SD of judgment | Robust SE | p |
+|---|---|---|---|
+| Runs per 100 chase swings | −0.38 | 0.25 | 0.13 |
+| Whiff rate on chases | +0.012 | 0.014 | 0.38 |
+| xwOBA on chase contact | −0.007 | 0.007 | 0.31 |
+| Two-strike contact rate | −0.001 | 0.008 | 0.93 |
+| Strikeout rate | +0.005 | 0.009 | 0.61 |
+| Two-strike chase rate | −0.000 | 0.008 | 0.97 |
+| Year-over-year chase change (2025 to 2026) | −0.005 | 0.009 | 0.57 |
+
+Every chase-quality point estimate leans the wrong way (sharper eyes, slightly costlier chases), so one candidate explanation was tested: that sharper hitters lay off borderline balls and their remaining chases are further off the plate, which are costlier league-wide (−0.04 runs per chase within an inch of the zone, −0.09 beyond six inches). It fails. Holding chase rate fixed, judgment does not move a hitter's mean chase edge distance or the share of far chases (p above 0.5 at both thresholds). The leanings are unexplained noise.
+
+**Reading.** Among hitters who chase the same amount, the ones with sharper challenge judgment do not chase more cheaply, make more two-strike contact, strike out less, or improve their chase rate more from the prior season. The eyes-versus-approach split as measured here predicts *whether* a hitter chases, not *what happens* when they do. The strongest remaining interpretation is that perception on takes near the edge is a different skill from what governs the outcome of a swing at a ball, and that chase rate itself already carries the perception signal (the −0.31 correlation). The null on frequent challengers is no longer a reliability artifact, though 102 hitters cannot rule out small effects; 2027 doubles the sample.
 
 ### Validation
 

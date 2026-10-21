@@ -57,7 +57,7 @@ def main() -> None:
     print(f"league intercept {prior['mean'][0]:.3f}, slope {prior['mean'][1]:.3f} per inch; "
           f"between-hitter SD intercept {np.sqrt(prior['var'][0]):.3f}, slope {np.sqrt(prior['var'][1]):.3f}")
     print("fixed effects (criterion shifts):", {k: round(v, 3) for k, v in prior["fixed"].items()})
-    big = J[J.n_decisions >= 150]
+    big = J[(J.n_decisions >= 150) & (J.n_challenges >= 8)]  # the slope is unidentified for non-challengers
     cols = ["batter_name", "n_decisions", "n_challenges", "n_opps", "slope", "slope_sd", "judgment_z", "edge_at_50", "hit_rate", "fa_rate", "d_prime"]
     print("\nsharpest perception (top 12):")
     print(big.head(12)[cols].to_string(index=False, float_format=lambda x: f"{x:.3f}"))

@@ -115,14 +115,16 @@ def extract_game(feed: dict) -> tuple[list[dict], list[dict], dict]:
     away = gd["teams"]["away"]["id"]
     venue_id = gd.get("venue", {}).get("id")
 
-    tokens = {home: TOKENS_PER_GAME, away: TOKENS_PER_GAME}          # rule A: no reset
-    tokens_b = {home: TOKENS_PER_GAME, away: TOKENS_PER_GAME}        # rule B: top-up in extras
+    tokens = {home: TOKENS_PER_GAME, away: TOKENS_PER_GAME}          # rule A: no reset (ledger accounting)
+    tokens_b = {home: TOKENS_PER_GAME, away: TOKENS_PER_GAME}        # rule B: top-up to 1 at the start of EACH extra inning
+    tokens_c = {home: TOKENS_PER_GAME, away: TOKENS_PER_GAME}        # rule C: top-up to 1 ONCE, at the start of the 10th
     last_inning_seen_b = 0
 
     pitches: list[dict] = []
     challenges: list[dict] = []
     n_impossible_a = 0
     n_impossible_b = 0
+    n_impossible_c = 0
 
     for play in feed["liveData"]["plays"]["allPlays"]:
         about = play["about"]
@@ -136,10 +138,13 @@ def extract_game(feed: dict) -> tuple[list[dict], list[dict], dict]:
         at_bat_number = play["atBatIndex"] + 1
 
         if inning >= 10 and inning != last_inning_seen_b:
+            first_extra = last_inning_seen_b < 10
             last_inning_seen_b = inning
             for t in (home, away):
                 if tokens_b[t] == 0:
                     tokens_b[t] = 1
+                if first_extra and tokens_c[t] == 0:
+                    tokens_c[t] = 1
 
         play_rd = play.get("reviewDetails")
         play_level_abs = bool(play_rd and play_rd.get("reviewType") == ABS_REVIEW_TYPE)
@@ -226,6 +231,7 @@ def extract_game(feed: dict) -> tuple[list[dict], list[dict], dict]:
                     "balls_before": balls, "strikes_before": strikes, "outs_before": running_outs,
                     "tokens_before": tokens[ct], "opp_tokens_before": tokens[fld_team if side == "bat" else bat_team],
                     "tokens_before_ruleB": tokens_b[ct],
+                    "tokens_before_ruleC": tokens_c[ct],
                     "at_play_level": is_play_level_here,
                     "side_consistent": (side == "bat") == original_is_strike,
                 }
@@ -234,9 +240,12 @@ def extract_game(feed: dict) -> tuple[list[dict], list[dict], dict]:
                     n_impossible_a += 1
                 if tokens_b[ct] <= 0:
                     n_impossible_b += 1
+                if tokens_c[ct] <= 0:
+                    n_impossible_c += 1
                 if not overturned:
                     tokens[ct] = max(tokens[ct] - 1, 0)
                     tokens_b[ct] = max(tokens_b[ct] - 1, 0)
+                    tokens_c[ct] = max(tokens_c[ct] - 1, 0)
 
             balls = cnt.get("balls", balls)
             strikes = cnt.get("strikes", strikes)
@@ -260,7 +269,8 @@ def extract_game(feed: dict) -> tuple[list[dict], list[dict], dict]:
         "ledger_away_remaining": (ledger.get("away") or {}).get("remaining"),
         "sim_home_remaining_ruleA": tokens[home], "sim_away_remaining_ruleA": tokens[away],
         "sim_home_remaining_ruleB": tokens_b[home], "sim_away_remaining_ruleB": tokens_b[away],
-        "n_impossible_ruleA": n_impossible_a, "n_impossible_ruleB": n_impossible_b,
+        "n_impossible_ruleA": n_impossible_a, "n_impossible_ruleB": n_impossible_b, "n_impossible_ruleC": n_impossible_c,
+        "sim_home_remaining_ruleC": tokens_c[home], "sim_away_remaining_ruleC": tokens_c[away],
         "extracted_home": sum(1 for c in challenges if c["challenge_team_id"] == home),
         "extracted_away": sum(1 for c in challenges if c["challenge_team_id"] == away),
         "box_abs_line": box_line,

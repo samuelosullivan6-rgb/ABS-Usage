@@ -36,11 +36,13 @@ OUTCOMES = {
 
 
 def assemble(judg: pd.DataFrame, hs: pd.DataFrame, prev_chase: pd.DataFrame | None = None,
-             min_decisions: int = 60, min_pa: int = 150) -> pd.DataFrame:
+             min_decisions: int = 60, min_pa: int = 150, min_challenges: int = 8) -> pd.DataFrame:
+    """min_challenges matters: a hitter who never challenges reveals nothing
+    about their eyes, and the slope is then set by the prior and the criterion."""
     df = hs.merge(judg[["batter_id", "judgment_z", "criterion_z", "slope", "intercept", "slope_sd",
                         "d_prime", "criterion_c", "n_decisions", "n_challenges", "n_opps", "edge_at_50"]],
                   on="batter_id", how="inner")
-    df = df[(df.n_decisions >= min_decisions) & (df.pa >= min_pa)].copy()
+    df = df[(df.n_decisions >= min_decisions) & (df.pa >= min_pa) & (df.n_challenges >= min_challenges)].copy()
     if prev_chase is not None:
         df = df.merge(prev_chase[["batter_id", "rb_chase_rate"]].rename(columns={"rb_chase_rate": "rb_chase_rate_prev"}),
                       on="batter_id", how="left")

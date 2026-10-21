@@ -94,7 +94,7 @@ def fit_pooled(d: pd.DataFrame) -> np.ndarray:
     return res.x
 
 
-def fit_hierarchical(d: pd.DataFrame, min_decisions: int = 60, n_iter: int = 3) -> tuple[pd.DataFrame, dict]:
+def fit_hierarchical(d: pd.DataFrame, min_decisions: int = 60, n_iter: int = 6) -> tuple[pd.DataFrame, dict]:
     """Empirical-Bayes random intercept + random slope on edge.
 
     Step 1: pooled logit gives fixed effects (count, tokens, leverage) and
@@ -144,11 +144,10 @@ def fit_hierarchical(d: pd.DataFrame, min_decisions: int = 60, n_iter: int = 3) 
                 "intercept": bs[0], "slope": bs[1], "intercept_sd": sd[0], "slope_sd": sd[1],
             })
         R = pd.DataFrame(rows)
-        # method-of-moments update of the prior variance
+        # EM update of the prior: the estimates are posterior means, so
+        # tau^2 = Var(posterior means) + E[posterior variance]
         for j, c in enumerate(["intercept", "slope"]):
-            tot = R[c].var()
-            samp = (R[f"{c}_sd"] ** 2).mean()
-            prior_var[j] = max(tot - samp, 1e-3)
+            prior_var[j] = max(R[c].var() + (R[f"{c}_sd"] ** 2).mean(), 1e-4)
         prior_mean = np.array([R.intercept.mean(), R.slope.mean()])
         log.info("EB iter %d: prior mean %s, prior var %s", it, prior_mean.round(3), prior_var.round(4))
     prior = {"mean": prior_mean, "var": prior_var, "fixed": dict(zip(FIXED, fixed)), "n_hitters": len(R)}

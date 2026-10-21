@@ -34,8 +34,15 @@ Extrapolating the feed's nine-parameter trajectory to y = 17/12 - 8.5/12 ft repr
 
 Standard pitch-level columns plus `delta_run_exp`, `delta_pitcher_run_exp`, `bat_speed`, `swing_length`, `miss_distance`, `attack_angle`, `swing_path_tilt`, intercept positions, `home_win_exp`. About 2,800 rows per 10-game day. This supplies chase cost and two-strike contact outcomes.
 
-## Still unverified
+## 6. Full-season results of the pipeline (2,429 unique games, 714,483 pitches)
 
-- Extra-innings token reset rule in the ledger (find a 2026 game past nine innings and inspect `absChallenges`).
-- Whether the 2025 Triple-A feed (sportId=11) carries the same `reviewDetails` structure.
-- Full-season pull volume: about 2,430 feeds at roughly 800 KB each.
+- 10,557 ABS challenges recovered, matching Savant's page total exactly. Overturn rate 53.9% overall: batters 4,766 at 48.8%, catchers 5,612 at 58.6%, pitchers 179 at 39.7%. The research doc's "refuted" league totals were correct.
+- Extracted per-team challenge counts match the official ledger in 2,428 of 2,429 games. The one miss (game 822717) is a plate appearance that carried both an ABS challenge and a replay review; the play-level `reviewDetails` holds only one.
+- Challenge side is consistent with the original call in 100% of cases (batting team challenges called strikes, fielding team challenges called balls).
+- The mid-plate geometry agrees with the ABS ruling on 99.99% of the 10,557 challenged pitches, with zero disagreements within a quarter inch of the edge.
+- Extra innings: 74 challenges were made by teams whose regular tokens were exhausted, all in innings 10 to 13, and up to three in one inning by the same team. The rule that explains every one is a top-up to one token at the start of each extra inning for a team at zero, retained on an overturn. The ledger's `remaining` field counts only the two regular tokens, so it is reconciled under the no-top-up accounting (99.84% of games) while the per-inning top-up is the operational rule.
+- The 2025 Triple-A feed (sportId 11) carries the same ledger and `reviewDetails` structure but omits the initiating `player`, so batter versus catcher can only be split by side.
+
+## 7. Statcast join
+
+Key `(game_pk, at_bat_number = atBatIndex + 1, pitch_number)` joins one-to-one; batter and pitcher ids agree on 100% of a checked game. The Statcast CSV's `plate_x/plate_z` differ from the feed's front-plate `pX/pZ` by a median of 0.02 ft horizontally and about 0.09 ft vertically, a systematic reference-plane difference. All geometry in this project uses the feed trajectory, so this does not matter for the ABS zone. Suspended games appear on two schedule dates and must be deduplicated by gamePk.

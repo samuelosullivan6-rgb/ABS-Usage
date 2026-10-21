@@ -65,7 +65,9 @@ def main() -> None:
 
     # ---- ledger reconciliation and the extra-innings rule -------------------
     rep.append(f"ledger match (counts): {gs.ledger_match.mean():.4f} of games")
-    for rule in ("A", "B"):
+    rep.append("extra-innings token rules: A = no top-up (the ledger's accounting); "
+               "B = team at zero gets one at the start of EACH extra inning; C = once, at the start of the 10th")
+    for rule in ("A", "B", "C"):
         rem_ok = ((gs[f"sim_home_remaining_rule{rule}"] == gs.ledger_home_remaining)
                   & (gs[f"sim_away_remaining_rule{rule}"] == gs.ledger_away_remaining)).mean()
         imp = gs[f"n_impossible_rule{rule}"].sum()
@@ -123,9 +125,11 @@ def main() -> None:
         pt = pt.merge(sc, on=key, how="left", validate="one_to_one")
         joined = pt.description.notna().mean()
         rep.append(f"statcast join rate: {joined:.4f} (rows {before:,} -> {len(pt):,})")
-        # plate coords should agree at the front of the plate
+        # Statcast CSV plate coords sit ~0.02 ft (x) and ~0.09 ft (z) from the feed's front-plate pX/pZ:
+        # a systematic reference-plane difference, not a key error (batter/pitcher ids match 100%).
         ok = pt.sc_plate_x.notna() & pt.px.notna()
-        rep.append(f"  front-plate x agreement |px-plate_x|<0.01: {((pt.px - pt.sc_plate_x).abs() < 0.01)[ok].mean():.4f}")
+        dx = (pt.px - pt.sc_plate_x).abs()[ok]
+        rep.append(f"  |px - statcast plate_x| < 0.2 ft on joined rows: {(dx < 0.2).mean():.4f} (median {dx.median():.3f} ft)")
         # runs to end of half-inning (for RE288)
         grp = pt.groupby(["game_pk", "inning", "half"])
         pt["half_final_bat_score"] = grp.post_bat_score.transform("max")

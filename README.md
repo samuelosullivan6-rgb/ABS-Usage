@@ -74,7 +74,17 @@ Hitters faced 65,589 called strikes with a token in hand within four inches of t
 | Split-half reliability, full season: criterion | 0.78 |
 | Split-half reliability, full season: d-prime | 0.11 |
 
-The headline measurement result is the last three rows. A hitter's willingness to challenge is a stable trait within one season. Their accuracy is barely measurable per hitter: a typical hitter makes 10 to 25 challenges, and the slope's posterior SD (about 0.13) is most of the between-hitter spread (0.18). The slope correlates 0.76 with the simpler signal-detection d-prime and 0.10 with the criterion, so the two dimensions are separated as intended, but any per-hitter ranking on eyes should be read with that reliability in mind. Judgment is unidentified for hitters who rarely challenge; rankings and the test use a minimum of eight challenges.
+The headline measurement result is the last three rows. A hitter's willingness to challenge is a stable trait within one season. Their accuracy looks barely measurable per hitter at first: a typical hitter makes 10 to 25 challenges, and the slope's posterior SD (about 0.13) is most of the between-hitter spread (0.18). The slope correlates 0.76 with the simpler signal-detection d-prime and 0.10 with the criterion, so the two dimensions are separated as intended.
+
+The low reliability is a sample-size problem, not a measurement problem. Split-half reliability of the slope, by how often a hitter challenges (`scripts/10_reliability_checks.py`):
+
+| Minimum challenges per half-season | Hitters | Slope reliability | Criterion reliability |
+|---|---|---|---|
+| none | 300 | 0.27 | 0.78 |
+| 5 | 119 | 0.31 | 0.76 |
+| 10 | 28 | 0.79 | 0.85 |
+
+With 20 or more challenges in a season the eyes score is as reliable as the criterion. The edge window barely matters (plus or minus 6 inches gives 0.29 and 0.83 at the same thresholds; plus or minus 2.5 is worse). In 2026, 62 regulars reached 20 challenges and 102 reached 15. Judgment is unidentified for hitters who rarely challenge; rankings and the main test use a minimum of eight, and the test is repeated at 15 and 20 below.
 
 ### Token value and the dynamic policy
 

@@ -26,6 +26,8 @@ def main() -> None:
     ap.add_argument("--prev-season", type=int, default=2025)
     ap.add_argument("--min-decisions", type=int, default=60)
     ap.add_argument("--min-pa", type=int, default=150)
+    ap.add_argument("--min-challenges", type=int, default=8,
+                    help="slope reliability rises steeply with challenges: ~0.3 at 8+, ~0.8 at 20+ per season")
     a = ap.parse_args()
 
     pt = pd.read_parquet(PROCESSED / f"pitch_table_{a.label}.parquet")
@@ -40,8 +42,9 @@ def main() -> None:
         prev = rulebook_chase_from_statcast(sc, min_pitches=500)
         print(f"previous season {a.prev_season}: {len(days)} days, {len(sc):,} pitches, {len(prev)} hitters")
 
-    df = assemble(J, hs, prev, min_decisions=a.min_decisions, min_pa=a.min_pa)
-    print(f"analysis sample: {len(df)} hitter-seasons (>= {a.min_decisions} decisions, >= {a.min_pa} PA)")
+    df = assemble(J, hs, prev, min_decisions=a.min_decisions, min_pa=a.min_pa, min_challenges=a.min_challenges)
+    suffix = f"{a.label}" if a.min_challenges == 8 else f"{a.label}_minchal{a.min_challenges}"
+    print(f"analysis sample: {len(df)} hitter-seasons (>= {a.min_decisions} decisions, >= {a.min_challenges} challenges, >= {a.min_pa} PA)")
     print(f"corr(judgment_z, chase_rate) = {df[['judgment_z', 'chase_rate']].corr().iloc[0, 1]:+.3f}; "
           f"corr(criterion_z, chase_rate) = {df[['criterion_z', 'chase_rate']].corr().iloc[0, 1]:+.3f}")
 
@@ -53,8 +56,8 @@ def main() -> None:
     if rel and rel > 0:
         res["beta_in_sd_disattenuated"] = res.beta_in_sd / rel
         print(f"judgment_z full-season reliability {rel:.3f}: disattenuated effects = raw / {rel:.3f}")
-    res.to_csv(PROCESSED / f"eyes_vs_approach_{a.label}.csv", index=False)
-    pd.concat([s.assign(outcome=o) for o, s in strata.items()]).to_csv(PROCESSED / f"eyes_vs_approach_strata_{a.label}.csv", index=False)
+    res.to_csv(PROCESSED / f"eyes_vs_approach_{suffix}.csv", index=False)
+    pd.concat([s.assign(outcome=o) for o, s in strata.items()]).to_csv(PROCESSED / f"eyes_vs_approach_strata_{suffix}.csv", index=False)
 
     print("\nEffect of +1 SD judgment (sharper eyes), holding chase-rate quintile, criterion, bat speed and side fixed:")
     cols = ["outcome", "n", "beta_judgment", "se_hc1", "p_hc1", "boot_lo", "boot_hi", "beta_in_sd", "delta_r2"]

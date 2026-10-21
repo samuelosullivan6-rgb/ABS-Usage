@@ -54,9 +54,81 @@ Raw data lives in `data/raw/` (gitignored, about 2 GB), processed tables in `dat
 
 Every umpire-called strike a hitter takes while the batting team holds a token is a decision: challenge or not. The true location is known from the trajectory. Across a season a hitter faces 60 to 400 of these, mostly within a few inches of the edge. A logit of challenge on true edge distance, with per-hitter random intercept and slope, separates how sharply the hitter's challenge probability rises as the pitch moves from inside the zone to outside it (eyes) from how far off the plate a pitch must be before they spend a token (approach). Count, token state and leverage shift the criterion and enter as fixed effects.
 
-## Results
+## Results, 2026 regular season
 
-See the Results section below once the full-season fits are recorded here, and `data/processed/` for the tables.
+All tables are in `data/processed/`; figures in `docs/figures/`. Sample: 2,429 games, 714,483 pitches, 10,557 challenges, Statcast joined on every pitch.
+
+### The psychometric curve
+
+![challenge judgment curve](docs/figures/psychometric_curve.png)
+
+Hitters faced 65,589 called strikes with a token in hand within four inches of the zone edge and challenged 7.0% of them. The umpire was wrong on 18% of those pitches. The league curve rises smoothly from under 1% at four inches inside the zone to about 40% at three and a half inches outside. It is a curve, not a step: at the edge itself hitters challenge only 11 to 14% of true balls. Two strikes shift the criterion by 1.9 logits (strike three is worth challenging), three balls by 0.5, a second token in hand by 0.2, the seventh inning onward by 0.7.
+
+| Quantity | Value |
+|---|---|
+| League slope | 0.65 per inch |
+| Between-hitter SD of slope (eyes) | 0.18 |
+| Between-hitter SD of intercept (criterion) | 0.66 |
+| Hitters scored (60+ decisions) | 388 |
+| Split-half reliability, full season: slope | 0.27 |
+| Split-half reliability, full season: criterion | 0.78 |
+| Split-half reliability, full season: d-prime | 0.11 |
+
+The headline measurement result is the last three rows. A hitter's willingness to challenge is a stable trait within one season. Their accuracy is barely measurable per hitter: a typical hitter makes 10 to 25 challenges, and the slope's posterior SD (about 0.13) is most of the between-hitter spread (0.18). The slope correlates 0.76 with the simpler signal-detection d-prime and 0.10 with the criterion, so the two dimensions are separated as intended, but any per-hitter ranking on eyes should be read with that reliability in mind. Judgment is unidentified for hitters who rarely challenge; rankings and the test use a minimum of eight challenges.
+
+### Token value and the dynamic policy
+
+![token value](docs/figures/token_value.png)
+
+Opportunities (taken pitches within three inches of the edge, both sides) arrive 1.32 times per team-half-inning and the umpire misses 20% of them. The league judgment slope implies perceptual noise of about 2.6 inches. Pricing a token by backward induction gives:
+
+| State | First token | Second token |
+|---|---|---|
+| Start of game | 0.49 runs | 0.23 runs |
+| Start of 5th | 0.33 | 0.15 |
+| Start of 9th | 0.10 | 0.03 |
+
+Savant's flat 0.20 is right for the first token around the sixth inning and for the second around the second. Early in the game the static rule challenges too readily; late it hoards.
+
+Playing every game forward with each rule, deciding on a perceived edge with league-average noise and scoring on the true ABS outcome:
+
+| Rule | Challenges per team-game | Overturned | Runs per team per 162 |
+|---|---|---|---|
+| Static (Savant breakeven) | 3.10 | 39.5% | 32.6 |
+| Dynamic (this repo) | 3.29 | 40.0% | 35.2 |
+| Observed behavior | 2.04 | 54.1% | 32.9 |
+| Oracle (perfect eyes) | 4.81 | 100% | 111.1 |
+
+The dynamic rule is worth about 2.5 runs per team-season over either the static rule or what teams actually did, with the same eyes. That is the low-single-digit figure the research brief anticipated, and it confirms that most of Savant's "runs not taken" is rational token conservation rather than error. The gap between any rule and the oracle (about 75 runs) is the value of perception, which is where the per-player layer lives: the policy table in `policy_hitter_thresholds_mlb_2026.csv` states, for each hitter, how far off the plate a pitch must look before spending the last token (about 1.9 inches in the first inning for the sharpest hitters, 4.5 to 5.7 for the shallowest, near zero for everyone in the ninth).
+
+### The eyes-versus-approach test
+
+![judgment vs chase](docs/figures/judgment_vs_chase.png)
+
+Sample: 219 hitters with 60+ decisions, 8+ challenges and 150+ PA.
+
+**Judgment predicts chasing.** Sharper challenge judgment correlates −0.21 with chase rate (p = 0.002; −0.41 after correcting for the score's reliability). It also correlates +0.24 with walk rate and −0.18 with in-zone swing rate, and 0.00 with strikeout rate. The criterion correlates +0.18 with chase rate (hitters who spend tokens freely also swing freely) and not with walks. So the perception signal on takes is related to swing decisions in the expected direction, and the aggressiveness signal is a different thing.
+
+**Holding chase rate fixed, judgment predicts nothing else yet.** With chase-rate quintile, criterion, bat speed and bat side controlled, a one-SD increase in judgment moves:
+
+| Outcome | Effect per SD of judgment | Robust SE | p | Effect in outcome SDs, disattenuated |
+|---|---|---|---|---|
+| Runs per 100 chase swings | −0.24 | 0.18 | 0.18 | −0.48 |
+| Whiff rate on chases | +0.002 | 0.010 | 0.87 | +0.06 |
+| xwOBA on chase contact | −0.004 | 0.005 | 0.49 | −0.27 |
+| Two-strike contact rate | +0.002 | 0.006 | 0.74 | +0.10 |
+| Strikeout rate | −0.002 | 0.006 | 0.70 | −0.13 |
+| Two-strike chase rate | +0.006 | 0.005 | 0.27 | +0.27 |
+
+None is distinguishable from zero, and the within-quintile contrasts change sign across quintiles. The one with a nonzero point estimate, run value per chase, points the wrong way for the hypothesis (sharper eyes, costlier chases), and its disattenuated size is still within noise. The year-over-year chase-improvement outcome is reported below once the 2025 Statcast pull completes.
+
+**Reading.** Among hitters who chase the same amount, the ones with sharper challenge judgment do not chase more cheaply, make more two-strike contact, or strike out less. The eyes-versus-approach split as measured here predicts *whether* a hitter chases, not *what happens* when they do. Two interpretations fit, and the data cannot yet separate them: perception on takes near the edge is a different skill from perception on the pitches hitters actually chase, which are further off the plate; or the per-hitter score is too unreliable in one season (0.27) to detect effects of the size that would matter, and the 2027 season doubles the sample. The null is a conservative null, not proof of absence.
+
+### Validation
+
+- Per-player challenge attribution matches Savant's leaderboard: batters 99.4% exact (the only gap is two players named Max Muncy merged by name), catchers 100% within one, pitchers 100% exact.
+- Geometry agrees with the ABS ruling on 99.99% of challenged pitches, with zero disagreements within a quarter inch.
+- End-of-game token state matches the official ledger in 99.84% of games under the ledger's accounting; the per-inning extras top-up explains all 74 zero-token challenges.
 
 ## Limits
 

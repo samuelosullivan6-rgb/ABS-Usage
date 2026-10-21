@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from abs_judgment.chase import hitter_season, rulebook_chase_from_statcast  # noqa: E402
 from abs_judgment.config import PROCESSED, RAW_STATCAST  # noqa: E402
-from abs_judgment.models import OUTCOMES, assemble, run_all  # noqa: E402
+from abs_judgment.models import OUTCOMES, assemble, fit_yoy_baseline, run_all  # noqa: E402
 from abs_judgment.savant import load_statcast_days  # noqa: E402
 
 
@@ -49,6 +49,10 @@ def main() -> None:
           f"corr(criterion_z, chase_rate) = {df[['criterion_z', 'chase_rate']].corr().iloc[0, 1]:+.3f}")
 
     res, strata = run_all(df)
+    yoy = fit_yoy_baseline(df)
+    if yoy:
+        res = pd.concat([res, pd.DataFrame([yoy])], ignore_index=True)
+        OUTCOMES["chase_rate_given_prev"] = ("rb_balls_seen", "current rulebook chase rate, controlling for prior-season chase rate (the clean year-over-year test)")
     res["label"] = res.outcome.map(lambda o: OUTCOMES[o][1])
     res["beta_in_sd"] = res.beta_judgment / res.sd_outcome
     import json

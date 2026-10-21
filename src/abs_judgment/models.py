@@ -101,6 +101,40 @@ def run_all(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     return pd.DataFrame(rows), strata
 
 
+def fit_yoy_baseline(df: pd.DataFrame) -> dict | None:
+    """Year-over-year chase change with the PRIOR season as the control.
+
+    The main table controls for the current season's chase rate, which is
+    the endpoint of the change and biases that row toward zero. The clean
+    question is: among hitters with the same prior-season chase rate, do
+    sharper eyes go with a lower current chase rate? Caveat: judgment and
+    the outcome are both measured in the current season, so a same-season
+    common cause is not excluded. The pre-registered version uses this
+    season's judgment to predict next season's change."""
+    if "rb_chase_rate_prev" not in df.columns:
+        return None
+    d = df[df.rb_chase_rate_prev.notna() & df.rb_chase_rate.notna()].copy()
+    if len(d) < 50:
+        return None
+    w = d.rb_balls_seen
+    m = smf.wls("rb_chase_rate ~ judgment_z + criterion_z + rb_chase_rate_prev + bat_speed + C(bat_side)", data=d, weights=w).fit(cov_type="HC1")
+    rng = np.random.default_rng(0)
+    bs = []
+    for _ in range(500):
+        dd = d.iloc[rng.integers(0, len(d), len(d))]
+        try:
+            bs.append(smf.wls("rb_chase_rate ~ judgment_z + criterion_z + rb_chase_rate_prev + bat_speed + C(bat_side)",
+                              data=dd, weights=dd.rb_balls_seen).fit().params["judgment_z"])
+        except Exception:  # noqa: BLE001
+            pass
+    bs = np.array(bs)
+    return {"outcome": "chase_rate_given_prev", "n": len(d), "beta_judgment": m.params["judgment_z"],
+            "se_hc1": m.bse["judgment_z"], "p_hc1": m.pvalues["judgment_z"],
+            "boot_lo": np.percentile(bs, 2.5), "boot_hi": np.percentile(bs, 97.5),
+            "sd_outcome": d.rb_chase_rate.std(), "delta_r2": np.nan, "beta_criterion": m.params["criterion_z"],
+            "beta_prev": m.params["rb_chase_rate_prev"]}
+
+
 def judgment_stability(j1: pd.DataFrame, j2: pd.DataFrame, min_decisions: int = 60) -> dict:
     """Split-half or year-to-year reliability of the judgment score."""
     m = j1.merge(j2, on="batter_id", suffixes=("_1", "_2"))

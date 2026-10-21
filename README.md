@@ -144,9 +144,19 @@ None is distinguishable from zero, and the within-quintile contrasts change sign
 | Two-strike chase rate | −0.000 | 0.008 | 0.97 |
 | Year-over-year chase change (2025 to 2026) | −0.005 | 0.009 | 0.57 |
 
+**Year-over-year chase change is the one positive result, with a caveat.** The row above controls for the 2026 chase rate, which is the endpoint of the change and biases that row toward zero (p = 0.10 on 175 hitters with a 2025 season). The clean question is: among hitters with the same 2025 chase rate, do sharper eyes go with a lower 2026 chase rate?
+
+| Sample | n | 2026 chase rate per SD of judgment, holding 2025 chase rate | Robust SE | p |
+|---|---|---|---|---|
+| 8+ challenges | 175 | −0.0099 | 0.0040 | 0.013 |
+| 15+ challenges | 88 | −0.0070 | 0.0056 | 0.22 |
+| 20+ challenges | 54 | −0.0090 | 0.0072 | 0.21 |
+
+One SD of sharper judgment goes with about one percentage point less chasing than the hitter's 2025 rate predicts, against a year-over-year change SD of 3.5 points. The point estimate is stable across thresholds; only the full sample has the power to call it. Two caveats. Judgment and the 2026 chase rate are measured in the same season, so a common cause (a hitter who simply saw the ball better in 2026) is not excluded; the pre-registered version uses 2026 judgment to predict the 2027 change. And the rulebook chase rate rose league-wide from 28.4% to 30.6% because the 2026 zone bounds in the Statcast feed are the fixed ABS bounds rather than stance-based; the shift is absorbed by the intercept but the levels are not comparable across years.
+
 Every chase-quality point estimate leans the wrong way (sharper eyes, slightly costlier chases), so one candidate explanation was tested: that sharper hitters lay off borderline balls and their remaining chases are further off the plate, which are costlier league-wide (−0.04 runs per chase within an inch of the zone, −0.09 beyond six inches). It fails. Holding chase rate fixed, judgment does not move a hitter's mean chase edge distance or the share of far chases (p above 0.5 at both thresholds). The leanings are unexplained noise.
 
-**Reading.** Among hitters who chase the same amount, the ones with sharper challenge judgment do not chase more cheaply, make more two-strike contact, strike out less, or improve their chase rate more from the prior season. The eyes-versus-approach split as measured here predicts *whether* a hitter chases, not *what happens* when they do. The strongest remaining interpretation is that perception on takes near the edge is a different skill from what governs the outcome of a swing at a ball, and that chase rate itself already carries the perception signal (the −0.31 correlation). The null on frequent challengers is no longer a reliability artifact, though 102 hitters cannot rule out small effects; 2027 doubles the sample.
+**Reading.** Among hitters who chase the same amount, the ones with sharper challenge judgment do not chase more cheaply, make more two-strike contact, or strike out less. What judgment does predict is the chase rate itself, both in cross-section (−0.21 overall, −0.31 among frequent challengers) and as a change from the prior season (about one point lower per SD, holding the 2025 rate). The eyes-versus-approach split as measured here says *whether* a hitter chases, and in which direction they are moving, not *what happens* when they swing at a ball. The interpretation that fits is that perception on takes near the edge governs the decision to swing, while the outcome of a swing at a ball is governed by something else (bat-to-ball skill, pitch type, how far off the plate the chase is). For the hitting coordinator this means the score sorts hitters into eyes cases and approach cases for the *rate* problem; it does not identify who will pay most per chase. The nulls on frequent challengers are no longer a reliability artifact, though 102 hitters cannot rule out small effects; 2027 doubles the sample, and the pre-registered test is 2026 judgment against 2027 chase change.
 
 ### Validation
 

@@ -1,0 +1,27 @@
+[project]
+name = "abs_judgment"
+version = "0.1.0"
+description = "ABS challenge judgment as a public signal of hitter perception: data pipeline, dynamic challenge policy, and the eyes-versus-approach test"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas",
+  "numpy",
+  "requests",
+  "pyarrow",
+  "scipy",
+  "statsmodels",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

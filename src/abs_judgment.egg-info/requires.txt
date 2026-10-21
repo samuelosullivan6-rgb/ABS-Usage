@@ -1,0 +1,10 @@
+pandas
+numpy
+requests
+pyarrow
+scipy
+statsmodels
+tqdm
+
+[dev]
+pytest

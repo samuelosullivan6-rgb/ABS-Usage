@@ -11,19 +11,21 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from abs_judgment.config import PROCESSED, ROOT  # noqa: E402
+from abs_judgment.policy import interp_belief, perceived_margin  # noqa: E402
 
 LOGIT_TO_PROBIT = 1.7
 STAKES = [("0-0 count, bases empty", 0.05), ("typical pitch", 0.19), ("3-2 count, runners on", 0.50)]
 BANDS = [("1st to 3rd", 1), ("4th to 6th", 7), ("7th and 8th", 13), ("9th", 17)]
+MARGIN_CAP_IN = 6.0  # margins beyond this are shown as ">6": no pitch looks that far off often enough to matter
+SAVANT_PRICE = 0.2
 REPORT = ROOT / "report"
 
 
@@ -58,10 +60,16 @@ def build_data(label: str) -> dict:
     prior = json.load(open(PROCESSED / f"judgment_prior_{label}.json"))
     tv = pd.read_csv(PROCESSED / f"token_value_{label}.csv")
     sim = pd.read_csv(PROCESSED / f"policy_simulation_{label}.csv")
+    seeds = pd.read_csv(PROCESSED / f"policy_seeds_{label}.csv")
+    sens = pd.read_csv(PROCESSED / f"policy_sigma_{label}.csv")
+    belief = json.load(open(PROCESSED / f"policy_belief_{label}.json"))
+    bgrid = pd.DataFrame(belief["grid"])
+    model = belief["belief"]
+    ab_league = (belief["a"], belief["b"]) if model == "calibrated" else None
     res = pd.read_csv(PROCESSED / f"eyes_vs_approach_{label}.csv")
     relc = pd.read_csv(PROCESSED / f"reliability_checks_{label}.csv")
 
-    sigma_league = LOGIT_TO_PROBIT / prior["mean"][1]
+    sigma_league = belief["sigma_league"]
 
     # ---- dugout table: how sure you need to be, by inning band, tokens held and stake
     def dv(h: int, k: int) -> float:
@@ -75,7 +83,7 @@ def build_data(label: str) -> dict:
                 d = dv(h, k)
                 p = d / (s + d)
                 row[f"p_{name}"] = round(p * 100)
-                row[f"in_{name}"] = round(sigma_league * norm.ppf(p), 1)
+                row[f"in_{name}"] = round(float(perceived_margin(p, sigma_league, model, ab_league)), 1)
             dugout.append(row)
 
     # ---- hitter cards
@@ -90,10 +98,11 @@ def build_data(label: str) -> dict:
     H["crit_pct"] = pct_rank(ref.criterion_z, H.criterion_z)
     H["chase_pct"] = pct_rank(H[H.pa >= 150].chase_rate, H.chase_rate)
     H["sigma"] = LOGIT_TO_PROBIT / H.slope.clip(lower=0.05)
+    ab_i = interp_belief(bgrid, H.sigma) if model == "calibrated" else None
     s_typ = STAKES[1][1]
     for col, (h, k) in {"m_early2": (1, 2), "m_early1": (1, 1), "m_mid1": (7, 1), "m_late1": (17, 1)}.items():
         p = dv(h, k) / (s_typ + dv(h, k))
-        H[col] = H.sigma * norm.ppf(p)
+        H[col] = np.where(H.slope.notna(), perceived_margin(p, H.sigma, model, ab_i), np.nan)
 
     def label_row(r) -> str:
         if r.pa < 150:
@@ -124,7 +133,32 @@ def build_data(label: str) -> dict:
     counts = pd.Series([r["label"] for r in hitters if r["pa"] >= 150]).value_counts().to_dict()
 
     # ---- study tables
-    sim_rows = sim[["rule", "challenges_per_team_game", "overturn_rate", "runs_per_team_162"]].round(3).to_dict("records")
+    sim_rows = sim[["rule", "overturned", "challenges_per_team_game", "overturn_rate", "runs_per_team_162", "minus_static", "minus_static_se",
+                    "minus_observed", "minus_observed_se"]].round(3).to_dict("records")
+    seed_rows = seeds.round(4).to_dict("records")
+    sens_rows = sens.sort_values(["belief", "sigma"], ascending=[True, True]).round(4).to_dict("records")
+
+    # ---- the dugout guidance, worded from the token values (whichever way they point)
+    t1 = tv[tv.tokens == 1].sort_values("half_inning")
+    above = t1[t1.token_value >= SAVANT_PRICE]
+    typ = STAKES[1][1]
+    p_at = lambda h, k, st: dv(h, k) / (st + dv(h, k))  # noqa: E731
+    sharp = sens[(sens.belief == model) & (sens.token1_first_pitch >= SAVANT_PRICE)]
+    guide = {
+        "never_above": bool(above.empty), "always_above": bool(len(above) == len(t1)),
+        "cross_inning": int(t1[t1.token_value < SAVANT_PRICE].inning.iloc[0]) if 0 < len(above) < len(t1) else None,
+        "p_early2": p_at(1, 2, typ), "p_early1": p_at(1, 1, typ), "p_static_typ": SAVANT_PRICE / (SAVANT_PRICE + typ),
+        "p_big_early2": p_at(1, 2, STAKES[2][1]), "p_late1": p_at(17, 1, typ),
+        "in_early2": float(perceived_margin(p_at(1, 2, typ), sigma_league, model, ab_league)),
+        "in_early1": float(perceived_margin(p_at(1, 1, typ), sigma_league, model, ab_league)),
+        "sharp_sigma": float(sharp.sigma.max()) if len(sharp) else None,
+        "sharp_tok1": float(sharp.loc[sharp.sigma.idxmax(), "token1_first_pitch"]) if len(sharp) else None,
+    }
+    cal = sens[sens.belief == model].sort_values("token1_first_pitch")
+    guide["cross_sigma"] = (float(np.interp(SAVANT_PRICE, cal.token1_first_pitch, cal.sigma))
+                            if cal.token1_first_pitch.min() < SAVANT_PRICE < cal.token1_first_pitch.max() else None)
+    tvx_path = PROCESSED / f"token_value_extras_{label}.csv"
+    guide["extras_tok1"] = float(pd.read_csv(tvx_path).query("tokens == 1 and half == 'top'").token_value.iloc[0]) if tvx_path.exists() else None
     eyes_rows = res[["outcome", "n", "beta_judgment", "se_hc1", "p_hc1", "label"]].round(4).to_dict("records")
     rel_rows = relc[relc.window_in == "-4..4"][["min_challenges_per_half", "n", "slope", "intercept"]].round(3).to_dict("records")
     yoy = res[res.outcome == "chase_rate_given_prev"]
@@ -149,7 +183,7 @@ def build_data(label: str) -> dict:
             {"name": bot.batter_name, "a": round(float(bot.intercept) + off, 4), "b": round(float(bot.slope), 4)},
         ],
     }
-    refh = H[(H.pa >= 150) & (H.chal >= 8) & H.judgment_z.notna()]
+    refh = H[(H.pa >= 150) & (H.chal >= 8) & H.judgment_z.notna()]  # the hitters the sort can rate
     m, b0 = np.polyfit(refh.judgment_z, refh.chase_rate, 1)
     scatter = {
         "points": [{"id": int(r.batter_id), "name": r.batter_name, "x": round(float(r.judgment_z), 3),
@@ -176,7 +210,9 @@ def build_data(label: str) -> dict:
             "fixed": prior["fixed"], "reliability": prior.get("reliability_full_season", {}),
             "n_scored": int(len(J)), "n_ref": int(len(ref)),
             "token_first_start": dv(1, 1), "token_second_start": dv(1, 2), "token_first_9th": dv(17, 1),
+            "belief": belief, "r_chase": float(np.corrcoef(refh.judgment_z, refh.chase_rate)[0, 1]), "n_r_chase": int(len(refh)),
         },
+        "guide": guide, "seeds": seed_rows, "sens": sens_rows,
         "dugout": dugout, "stakes": [n for n, _ in STAKES], "teams": teams, "hitters": hitters, "label_counts": counts,
         "sim": sim_rows, "eyes": eyes_rows, "rel": rel_rows, "yoy": yoy_row,
     }
@@ -300,27 +336,23 @@ a{color:var(--accent)}
   <h2>When to spend a token</h2>
   <div class="grid2">
     <div style="display:grid;gap:12px">
-      <p>A challenge token is not worth a fixed amount. It is worth what it can still buy over the rest of the game. At first pitch the first token is worth about <b>@@TOK1@@ runs</b> and the second about <b>@@TOK2@@</b>; by the 9th the last token is worth about <b>@@TOK9@@</b>. Savant's breakeven rule prices every token at 0.20 runs, which is right only in the middle innings. So: be stingy early, be aggressive late.</p>
-      <ol class="rules">
-        <li><span><b>Early, with both tokens, challenge only when you are sure.</b> Roughly three in four, which for an average eye is a pitch that looks about 1.5 to 2 inches off the plate.</span></li>
-        <li><span><b>Strike three and ball four are the big stakes.</b> On a 3-2 count with runners on, a flip is worth half a run. Lower your bar there, even early.</span></li>
-        <li><span><b>In the 9th with your last token, a coin flip is enough.</b> An unused token at the final out is worth nothing.</span></li>
-        <li><span><b>Extra innings give a team at zero one token back each inning.</b> Treat the 9th-inning rule as the rule for the rest of the game.</span></li>
-      </ol>
-      <p class="src">Source: token_value_@@LABEL@@.csv (backward induction), stakes_@@LABEL@@.csv, policy_simulation_@@LABEL@@.csv.</p>
+      <p>A challenge token is not worth a fixed amount. It is worth what it can still buy over the rest of the game. At first pitch the first token is worth about <b>@@TOK1@@ runs</b> and the second about <b>@@TOK2@@</b>; by the 9th the last token is worth about <b>@@TOK9@@</b>. @@SPEND_VERDICT@@</p>
+      <ol class="rules">@@SPEND_RULES@@</ol>
+      <p class="callout">@@SPEND_REVISION@@</p>
+      <p class="src">Source: token_value_@@LABEL@@.csv and token_value_extras_@@LABEL@@.csv (backward induction), stakes_@@LABEL@@.csv, policy_sigma_@@LABEL@@.csv.</p>
     </div>
     <figure class="viz" id="viz-token">
       <div class="viz-head"><div class="viz-title">What a held token is worth, by half-inning</div>
         <div class="viz-legend"><span><i style="background:var(--series-1)"></i>First token</span><span><i style="background:var(--series-2)"></i>Second token</span><span><i style="background:var(--viz-axis)"></i>Savant's flat price</span></div></div>
-      <div class="viz-plot" role="img" aria-label="Line chart of the marginal value of the first and second token across 18 half-innings, both falling toward zero, with a flat reference at 0.20 runs"></div>
+      <div class="viz-plot" role="img" aria-label="@@TOKEN_ARIA@@"></div>
       <figcaption>Runs. Hover or focus and use the arrow keys to read any half-inning.</figcaption>
       <details><summary>Table view</summary><div class="tablebox"><table class="viz-table"></table></div></details>
     </figure>
   </div>
   <h3>How sure you need to be</h3>
-  <p>Percent chance the call flips that justifies a challenge, by inning, tokens held and what the pitch is worth. The second number in each cell is how far off the plate the pitch has to look to an average eye (negative means a pitch that looks a touch inside is still worth it).</p>
+  <p>Percent chance the call flips that justifies a challenge, by inning, tokens held and what the pitch is worth. The second number in each cell is how far off the plate the pitch has to look to an average eye that knows the umpire is right on about @@UMP_RIGHT@@% of near-edge calls (negative means a pitch that looks a touch inside is still worth it).</p>
   <div class="tablebox"><table id="dugout"><thead><tr><th>Innings</th><th>Tokens</th>@@DUGOUT_HEAD@@</tr></thead><tbody>@@DUGOUT_ROWS@@</tbody></table></div>
-  <p class="src">Threshold = token value / (stake + token value). Inches = perceptual noise (@@SIGMA@@ in for the league) times the normal quantile of the threshold. Per-hitter versions are in the cards below.</p>
+  <p class="src">Threshold = token value / (stake + token value). Inches = the perceived edge at which the calibrated belief P(flip | perceived edge) = expit(@@BELIEF_A@@ + @@BELIEF_B@@ × edge) reaches the threshold, for league-average perceptual noise of @@SIGMA@@ in. Per-hitter versions are in the cards below. Source: policy_belief_@@LABEL@@.json.</p>
 </section>
 
 <section id="cards">
@@ -336,9 +368,9 @@ a{color:var(--accent)}
   <div class="tablebox"><table id="cards-table"><thead><tr>
     <th>Hitter</th><th>Team</th><th class="num">PA</th><th class="num">Chal</th><th class="num">Won</th><th class="num">Eyes pct</th><th class="num">Spends pct</th><th class="num">Chase %</th><th class="num">Chase pct</th><th class="num">Early, 2 tok</th><th class="num">Early, last</th><th class="num">Mid, last</th><th class="num">9th, last</th><th>Sort</th>
   </tr></thead><tbody id="cards-body"></tbody></table></div>
-  <div class="legend"><span><b>Won</b> = call overturned</span><span><b>Eyes pct</b> = percentile of perceptual sharpness among @@NREF@@ regulars with 8+ challenges</span><span><b>Spends pct</b> = percentile of willingness to challenge</span><span>Margins in inches off the plate on a typical pitch</span></div>
+  <div class="legend"><span><b>Won</b> = call overturned</span><span><b>Eyes pct</b> = percentile of perceptual sharpness among @@NREF@@ regulars with 8+ challenges</span><span><b>Spends pct</b> = percentile of willingness to challenge</span><span>Margins in inches off the plate on a typical pitch; &gt;6 means no pitch looks far enough off to be worth it</span></div>
   <p class="src" id="count"></p>
-  <p class="src">Source: judgment_@@LABEL@@.csv, hitter_season_@@LABEL@@.csv, challenges_@@LABEL@@.parquet, token_value_@@LABEL@@.csv. Team is the hitter's most frequent batting team.</p>
+  <p class="src">Source: judgment_@@LABEL@@.csv, hitter_season_@@LABEL@@.csv, challenges_@@LABEL@@.parquet, token_value_@@LABEL@@.csv, policy_belief_@@LABEL@@.json. Team is the hitter's most frequent batting team. A margin rests on the hitter's eyes slope, which is mostly noise below 20 challenges; read it to the nearest inch.</p>
 </section>
 
 <section id="sort">
@@ -348,7 +380,7 @@ a{color:var(--accent)}
       <p>A hitter who chases has one of two problems. Either he does not see the pitch well enough to know it is a ball, or he sees it fine and swings anyway. The fix differs: pitch-recognition work for the first, a count plan for the second. Chase rate alone cannot separate them because every swing mixes perception with intent. The challenge decision on a take has no swing in it.</p>
       <p>The sort in the cards uses both: a hitter in the top 40% of chase rate with a below-median eyes score is an <span class="pill eyes">Eyes case</span>; the same chaser with an above-median eyes score is an <span class="pill approach">Approach case</span>. Hitters in the bottom 40% of chase rate are <span class="pill disc">Disciplined</span>.</p>
       <div class="stats">@@LABEL_STATS@@</div>
-      <p><b>What the evidence supports.</b> Sharper eyes on takes go with chasing less (correlation @@R_CHASE@@ across regulars, stronger among frequent challengers) and with cutting the chase rate from the prior season. They do <em>not</em> go with cheaper chases, better two-strike contact or fewer strikeouts once chase rate is held fixed. So the sort tells you which lever moves the <em>rate</em>; it does not say who pays most per chase.</p>
+      <p><b>What the evidence supports.</b> Sharper eyes on takes go with chasing less (correlation @@R_CHASE@@ across the @@N_R_CHASE@@ rated regulars, stronger among frequent challengers) and with cutting the chase rate from the prior season. They do <em>not</em> go with cheaper chases, better two-strike contact or fewer strikeouts once chase rate is held fixed. So the sort tells you which lever moves the <em>rate</em>; it does not say who pays most per chase.</p>
     </div>
     <figure class="viz" id="viz-scatter">
       <div class="viz-head"><div class="viz-title">Eyes on takes against chasing on swings, @@SEASON@@ regulars</div></div>
@@ -383,14 +415,23 @@ a{color:var(--accent)}
     </div>
   </div>
   <h3>Policy</h3>
-  <p>Every game replayed with each rule, deciding on a perceived edge with league-average noise and scored on the true ABS outcome. Runs per team per 162 games.</p>
+  <p>Every game replayed with each rule. The static and dynamic rules decide on a perceived edge drawn with league-average Gaussian noise (@@SIGMA@@ in) and a calibrated belief, and are scored on the true ABS outcome. Runs per team per 162 games; differences are paired by game over @@GAMES@@ games, plus or minus one standard error.</p>
+  <div class="callout"><b>The observed row is not the same eyes.</b> It is real players deciding with their own eyes: @@OBS_OT@@% overturned on @@OBS_CHAL@@ challenges per team-game. Under the league-average noise model only @@N_P06@@ of @@N_OPP@@ opportunities carry a belief above 60%, yet players won @@OBS_WON@@ challenges. Real players see something the noise model does not, so the gap between a simulated rule and observed behaviour is not a property of the rule. Compare static with dynamic; read observed as context.</div>
   <figure class="viz" id="viz-bars">
     <div class="viz-head"><div class="viz-title">Runs per team-season by challenge rule</div></div>
-    <div class="viz-plot" role="img" aria-label="Horizontal bars: the static rule, the dynamic rule and observed behavior each near 33 runs, and the oracle with perfect eyes at 111"></div>
-    <figcaption>The gap to the oracle is the value of perception; the gap between rules is the value of pricing the token.</figcaption>
+    <div class="viz-plot" role="img" aria-label="@@BARS_ARIA@@"></div>
+    <figcaption>The gap to the oracle is the value of perception; the gap between static and dynamic is the value of pricing the token.</figcaption>
   </figure>
-  <div class="tablebox"><table><thead><tr><th>Rule</th><th class="num">Challenges per team-game</th><th class="num">Overturned</th><th class="num">Runs per team-season</th></tr></thead><tbody>@@SIM_ROWS@@</tbody></table></div>
-  <p class="src">Oracle challenges exactly the umpire's misses, the ceiling with perfect eyes. Observed is what players did on the same pitches. Source: policy_simulation_@@LABEL@@.csv.</p>
+  <div class="tablebox"><table><thead><tr><th>Rule</th><th>Eyes</th><th class="num">Challenges per team-game</th><th class="num">Overturned</th><th class="num">Runs per team-season</th><th class="num">vs static</th><th class="num">vs observed</th></tr></thead><tbody>@@SIM_ROWS@@</tbody></table></div>
+  <p class="src">Oracle challenges exactly the umpire's misses, the ceiling with perfect eyes. Observed is what players did on the same pitches. @@SEED_LINE@@ Source: policy_simulation_@@LABEL@@.csv, policy_seeds_@@LABEL@@.csv.</p>
+  <h3>What the belief model does</h3>
+  <p>The challenger's belief is the probability the call flips given the edge they perceive. The calibrated belief is fit on the opportunities themselves, so it knows the umpire is usually right: in every fifth of its range it is within @@CAL_GAP@@ points of the true flip rate. The flat-prior belief, P = &Phi;(perceived edge / noise), was used on this page before 2026-10-23. It ignores the umpire's base rate, and a pitch it calls 80 to 100% likely flips about half the time.</p>
+  <div class="tablebox"><table><thead><tr><th>Belief</th><th class="num">First token, first pitch</th><th class="num">Static: chal / overturned / runs</th><th class="num">Dynamic: chal / overturned / runs</th><th class="num">Dynamic − static</th><th class="num">Dynamic − observed</th></tr></thead><tbody>@@BELIEF_ROWS@@</tbody></table></div>
+  <p class="src">League-average noise, noise draw @@SEED@@. Source: policy_seeds_@@LABEL@@.csv.</p>
+  <h3>Sensitivity to the noise level</h3>
+  <p>The noise level, @@SIGMA@@ inches, comes from the league eyes slope and is an upper bound (the slope also absorbs criterion variation). Under the flat prior the token's value barely moves with it; under calibrated beliefs it does, and below about @@SHARP_SIGMA@@ inches the first token at first pitch is worth more than Savant's 0.20.</p>
+  <div class="tablebox"><table><thead><tr><th class="num">Noise (in)</th><th class="num">Calibrated: first token</th><th class="num">Static runs</th><th class="num">Dynamic runs</th><th class="num">Dynamic − static</th><th class="num">Flat prior: first token</th><th class="num">Dynamic − static</th></tr></thead><tbody>@@SENS_ROWS@@</tbody></table></div>
+  <p class="src">Noise draw @@SEED@@ at every level; the starred row is the league estimate. Source: policy_sigma_@@LABEL@@.csv.</p>
   <h3>The test</h3>
   <p>Among hitters with similar chase rates, does poor challenge judgment predict costlier chases, worse two-strike contact, or weaker year-over-year improvement? Effect of one SD of sharper eyes, holding chase-rate quintile, criterion, bat speed and bat side fixed. @@N_TEST@@ regulars with 8+ challenges.</p>
   <div class="tablebox"><table><thead><tr><th>Outcome</th><th class="num">n</th><th class="num">Effect</th><th class="num">SE</th><th class="num">p</th></tr></thead><tbody>@@EYES_ROWS@@</tbody></table></div>
@@ -405,8 +446,9 @@ a{color:var(--accent)}
     <dt>Zone</dt><dd>The feed's strike-zone bounds are the fixed ABS zone (53.5% and 27% of measured height). Ball location is solved at the plate midpoint from the nine-parameter trajectory; the signed edge distance uses a 2.9-inch ball and reproduces Savant's values exactly. It agrees with the ABS ruling on 99.99% of challenged pitches.</dd>
     <dt>Decision set</dt><dd>Umpire-called strikes the hitter took with a token in hand, within 4 inches of the edge: @@DEC_N@@ pitches, @@DEC_CHAL@@ challenged.</dd>
     <dt>Judgment model</dt><dd>Logit of challenge on edge distance with per-hitter random intercept and slope, fit by empirical Bayes; count, token and leverage shifters as fixed effects. The slope is unidentified for hitters who rarely challenge.</dd>
-    <dt>Token value</dt><dd>Backward induction over decision slots with opportunities arriving at the observed rate (taken pitches within 3 inches of the edge, both sides), stakes from Statcast run expectancy, and a per-inning top-up in extra innings as observed in the ledgers.</dd>
-    <dt>Caveats</dt><dd>One season of ABS. Run units, not win probability, so late close games are undervalued. League-average perception in the policy simulation. The eyes score needs about 20 challenges to be reliable per hitter. Year-over-year judgment and outcome share a season.</dd>
+    <dt>Token value</dt><dd>Backward induction over eight decision slots per half-inning for nine innings, with opportunities arriving at the observed rate (@@LAMBDA@@ per team-half-inning: taken pitches within 3 inches of the edge, both sides) and stakes from Statcast run expectancy. Extra innings enter as a continuation value at the last out of the 9th: @@N_EXTRAS@@ of @@GAMES@@ games went to the 10th, each extra inning is followed by another with probability @@RHO@@, and a team at zero gets one token back at the start of every extra inning, as the ledgers show. The simulated rules play the same token rule.</dd>
+    <dt>Belief</dt><dd>A challenger perceives the true edge plus Gaussian noise and holds the calibrated posterior P(flip | perceived edge), a logit of the true flip on the perceived edge fit with the same noise draw. The per-hitter margins use the same fit at each hitter's own noise level.</dd>
+    <dt>Caveats</dt><dd>One season of ABS. Run units, not win probability, so late close games are undervalued. The simulated rules use league-average Gaussian perception; the observed row is real players, who know more than that model. Under calibrated beliefs the token's value depends on the noise level, which is an upper bound. The eyes score needs about 20 challenges to be reliable per hitter. Year-over-year judgment and outcome share a season.</dd>
     <dt>Update</dt><dd>Rerun <code>scripts/run_pipeline.sh</code> and <code>scripts/11_club_brief.py</code> on the new season. Everything on this page regenerates from the processed tables named under each section.</dd>
   </dl>
 </section>
@@ -414,7 +456,7 @@ a{color:var(--accent)}
 
 <script>
 const DATA = @@DATA@@;
-const fmt1 = v => v == null ? "" : (v > 0 ? "+" : "") + v.toFixed(1);
+const fmt1 = v => v == null ? "" : v > @@CAP@@ ? "&gt;@@CAP@@" : (v > 0 ? "+" : "") + v.toFixed(1);
 const pct = v => v == null ? "" : Math.round(v);
 const pillClass = l => l === "Eyes case" ? "pill eyes" : l === "Approach case" ? "pill approach" : l === "Disciplined" ? "pill disc" : "pill";
 const body = document.getElementById("cards-body");
@@ -464,8 +506,8 @@ function keyNav(svg, n, getIdx, show, hide){ svg.addEventListener("keydown", e =
   responsive(plot, () => {
     const W = Math.max(280, plot.clientWidth), H = 300, m = {t: 18, r: 16, b: 34, l: 42}, n = D.length;
     plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
-    const x = i => m.l + i / (n - 1) * (W - m.l - m.r), yMax = 0.55, y = v => m.t + (1 - v / yMax) * (H - m.t - m.b);
-    ticks(0, yMax, 5).forEach(v => { el("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--viz-grid)"}, svg); txt(svg, m.l - 8, y(v) + 4, v.toFixed(1), "tick", "end"); });
+    const x = i => m.l + i / (n - 1) * (W - m.l - m.r), yMax = Math.max(0.25, Math.ceil(Math.max(...D.map(d => d.t1)) * 1.15 * 20) / 20), y = v => m.t + (1 - v / yMax) * (H - m.t - m.b);
+    ticks(0, yMax, 5).forEach(v => { el("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--viz-grid)"}, svg); txt(svg, m.l - 8, y(v) + 4, v.toFixed(2), "tick", "end"); });
     el("line", {x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), stroke: "var(--viz-axis)"}, svg);
     D.forEach((d, i) => { if (i % 2 === 0) txt(svg, x(i), H - m.b + 18, lab(d), "tick", "middle"); });
     el("line", {x1: m.l, x2: W - m.r, y1: y(0.2), y2: y(0.2), stroke: "var(--viz-axis)", "stroke-width": 1.5}, svg);
@@ -548,7 +590,7 @@ function keyNav(svg, n, getIdx, show, hide){ svg.addEventListener("keydown", e =
   const fig = document.getElementById("viz-bars"), plot = fig.querySelector(".viz-plot"), D = DATA.charts.bars;
   const names = {static: "Static rule (Savant breakeven)", dynamic: "Dynamic rule (this study)", observed: "Observed behavior", oracle: "Oracle (perfect eyes)"};
   responsive(plot, () => {
-    const W = Math.max(280, plot.clientWidth), row = 34, m = {t: 8, r: 56, b: 28, l: Math.min(230, Math.max(120, W * 0.32))}, H = m.t + D.length * row + m.b, xMax = 120;
+    const W = Math.max(280, plot.clientWidth), row = 34, m = {t: 8, r: 56, b: 28, l: Math.min(230, Math.max(120, W * 0.32))}, H = m.t + D.length * row + m.b, xMax = Math.ceil(Math.max(...D.map(d => d.runs)) * 1.08 / 20) * 20;
     plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
     const x = v => m.l + v / xMax * (W - m.l - m.r);
     ticks(0, xMax, 6).forEach(v => { el("line", {x1: x(v), x2: x(v), y1: m.t, y2: H - m.b, stroke: "var(--viz-grid)"}, svg); txt(svg, x(v), H - m.b + 16, String(v), "tick", "middle"); });
@@ -565,9 +607,71 @@ function keyNav(svg, n, getIdx, show, hide){ svg.addEventListener("keydown", e =
 """
 
 
+def ordinal(n: int) -> str:
+    return f"{n}{'th' if 11 <= n % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def spend_text(data: dict) -> dict:
+    """The dugout's 'when to spend a token' guidance, worded from the token values."""
+    f, g = data["facts"], data["guide"]
+    pc = lambda v: f"{round(v * 100)}%"  # noqa: E731
+    if g["never_above"]:
+        verdict = ("Savant's breakeven rule prices every token at 0.20 runs. For a league-average eye that is more than a token "
+                   "is worth at any point in the game, so the rule is too stingy throughout: challenge more readily than it says, "
+                   "early as well as late, and more readily still as the game goes on.")
+    elif g["always_above"]:
+        verdict = ("Savant's breakeven rule prices every token at 0.20 runs, less than a token is worth at any point in the game, "
+                   "so the rule is too free throughout: challenge less readily than it says.")
+    else:
+        verdict = (f"Savant's breakeven rule prices every token at 0.20 runs, which is too little before the {ordinal(g['cross_inning'])} "
+                   "inning and too much after it: be stingier than the rule early and more aggressive late.")
+    rules = [
+        f"<b>Early, with both tokens, a {pc(g['p_early2'])} chance the call flips is enough on a typical pitch.</b> With the last token "
+        f"early, about {pc(g['p_early1'])}. Savant's price asks for {pc(g['p_static_typ'])}. To an average eye that is a pitch that looks "
+        f"about {g['in_early2']:.1f} inches off the plate with two tokens and {g['in_early1']:.1f} with one.",
+        f"<b>Strike three and ball four are the big stakes.</b> On a 3-2 count with runners on a flip is worth half a run, and early with "
+        f"both tokens a {pc(g['p_big_early2'])} chance is enough.",
+        f"<b>In the 9th with your last token, about {pc(g['p_late1'])} is enough.</b> An unused token at the final out is worth nothing, "
+        "and a team at zero gets one back if the game goes on.",
+    ]
+    if g["extras_tok1"] is not None:
+        rules.append(f"<b>Extra innings give a team at zero one token back each inning.</b> A token in an extra inning is worth about "
+                     f"{g['extras_tok1']:.2f} runs, the same as in the 9th, so the 9th-inning rule is the rule for the rest of the game.")
+    if g["sharp_sigma"] is not None:
+        rules.append(f"<b>These numbers are for league-average eyes.</b> Sharper eyes make a token worth more: with perceptual noise of "
+                     f"{g['sharp_sigma']:.1f} inches instead of {f['sigma_league']:.1f}, the first token at first pitch is worth "
+                     f"{g['sharp_tok1']:.2f} runs, above Savant's price, and early in the game the bar moves back toward Savant's.")
+    flat = next((r for r in data["seeds"] if r["belief"] == "flat" and r["seed"] == f["belief"]["seed"]), None)
+    revision = ("Revised 2026-10-23. An earlier version of this page valued the first token at "
+                f"{flat['token1_first_pitch']:.2f} runs and said to be stingy early. That came from a belief model in which a challenger "
+                "who felt 90% sure was right about half the time. With beliefs that know how often the umpire is right, the first "
+                f"token is worth {f['token_first_start']:.2f} and the early advice reverses.") if flat else ""
+    return {"verdict": verdict, "rules": "".join(f"<li><span>{r}</span></li>" for r in rules), "revision": revision}
+
+
+def fmt_margin(v: float) -> str:
+    return f"&gt;{MARGIN_CAP_IN:.0f}" if v > MARGIN_CAP_IN else f"{v:+.1f}"
+
+
+def pm(v: float, se: float) -> str:
+    return f"{v:+.1f} ± {se:.1f}"
+
+
 def render(data: dict, label: str) -> str:
     f = data["facts"]
+    B = f["belief"]
     html = TEMPLATE
+    sp = spend_text(data)
+    seeds_primary = [r for r in data["seeds"] if r["belief"] == B["belief"]]
+    obs = next(r for r in data["sim"] if r["rule"] == "observed")
+    sim_name = {"static": "Static (Savant breakeven)", "dynamic": "Dynamic (this study)", "observed": "Observed behaviour",
+                "oracle": "Oracle (perfect eyes)"}
+    sim_eyes = {"static": "simulated", "dynamic": "simulated", "observed": "real players", "oracle": "perfect"}
+    sens = {(r["belief"], round(r["sigma"], 2)): r for r in data["sens"]}
+    sigmas = sorted({round(r["sigma"], 2) for r in data["sens"]})
+    league_sig = round(f["sigma_league"], 2)
+    token_vals = [d["t1"] for d in data["charts"]["token"]]
+    bars = data["charts"]["bars"]
     rep = {
         "@@SEASON@@": data["season"], "@@LABEL@@": label,
         "@@GAMES@@": f"{f['games']:,}", "@@CHALLENGES@@": f"{f['challenges']:,}",
@@ -583,7 +687,7 @@ def render(data: dict, label: str) -> str:
         "@@DUGOUT_HEAD@@": "".join(f'<th class="num">{n}</th>' for n in data["stakes"]),
         "@@DUGOUT_ROWS@@": "".join(
             f"<tr><td>{r['band']}</td><td>{r['tokens']}</td>" + "".join(
-                f"<td class=\"num\">{r['p_'+n]}% · {r['in_'+n]:+.1f} in</td>" for n in data["stakes"]) + "</tr>"
+                f"<td class=\"num\">{r['p_'+n]}% · {fmt_margin(r['in_'+n])} in</td>" for n in data["stakes"]) + "</tr>"
             for r in data["dugout"]),
         "@@LABEL_STATS@@": "".join(
             f'<div class="stat"><b>{data["label_counts"].get(k, 0)}</b><span>{k}</span></div>'
@@ -592,21 +696,58 @@ def render(data: dict, label: str) -> str:
             f"<tr><td>{'none' if r['min_challenges_per_half']==0 else int(r['min_challenges_per_half'])}</td><td class=\"num\">{int(r['n'])}</td><td class=\"num\">{r['slope']:.2f}</td><td class=\"num\">{r['intercept']:.2f}</td></tr>"
             for r in data["rel"]),
         "@@SIM_ROWS@@": "".join(
-            f"<tr><td>{r['rule']}</td><td class=\"num\">{r['challenges_per_team_game']:.2f}</td><td class=\"num\">{'' if pd.isna(r['overturn_rate']) else f'{r['overturn_rate']*100:.0f}%'}</td><td class=\"num\">{r['runs_per_team_162']:.1f}</td></tr>"
-            for r in data["sim"] if r["rule"] != "never"),
+            f"<tr><td>{sim_name.get(r['rule'], r['rule'])}</td><td>{sim_eyes.get(r['rule'], '')}</td><td class=\"num\">{r['challenges_per_team_game']:.2f}</td>"
+            f"<td class=\"num\">{'' if pd.isna(r['overturn_rate']) else f'{r['overturn_rate']*100:.0f}%'}</td><td class=\"num\">{r['runs_per_team_162']:.1f}</td>"
+            f"<td class=\"num\">{'' if r['rule'] == 'static' else pm(r['minus_static'], r['minus_static_se'])}</td>"
+            f"<td class=\"num\">{'' if r['rule'] == 'observed' else pm(r['minus_observed'], r['minus_observed_se'])}</td></tr>"
+            for r in data["sim"] if r["rule"] in sim_name),
+        "@@SEED_LINE@@": ("Across noise draws " + ", ".join(str(int(r["seed"])) for r in seeds_primary) + ", dynamic minus static was "
+                          + ", ".join(pm(r["dyn_minus_static"], r["dyn_minus_static_se"]) for r in seeds_primary)
+                          + " and dynamic minus observed " + ", ".join(pm(r["dyn_minus_observed"], r["dyn_minus_observed_se"]) for r in seeds_primary) + "."),
+        "@@BELIEF_ROWS@@": "".join(
+            f"<tr><td>{'Calibrated (this page)' if r['belief'] == 'calibrated' else 'Flat prior (before 2026-10-23)'}</td>"
+            f"<td class=\"num\">{r['token1_first_pitch']:.3f}</td>"
+            f"<td class=\"num\">{r['static_chal']:.2f} / {r['static_ot']*100:.0f}% / {r['static_runs']:.1f}</td>"
+            f"<td class=\"num\">{r['dynamic_chal']:.2f} / {r['dynamic_ot']*100:.0f}% / {r['dynamic_runs']:.1f}</td>"
+            f"<td class=\"num\">{pm(r['dyn_minus_static'], r['dyn_minus_static_se'])}</td><td class=\"num\">{pm(r['dyn_minus_observed'], r['dyn_minus_observed_se'])}</td></tr>"
+            for r in data["seeds"] if r["seed"] == B["seed"]),
+        "@@SENS_ROWS@@": "".join(
+            (lambda c, fl: f"<tr><td class=\"num\">{sg:.2f}{' *' if sg == league_sig else ''}</td><td class=\"num\">{c['token1_first_pitch']:.3f}</td>"
+             f"<td class=\"num\">{c['static_runs']:.1f}</td><td class=\"num\">{c['dynamic_runs']:.1f}</td><td class=\"num\">{pm(c['dyn_minus_static'], c['dyn_minus_static_se'])}</td>"
+             f"<td class=\"num\">{fl['token1_first_pitch']:.3f}</td><td class=\"num\">{pm(fl['dyn_minus_static'], fl['dyn_minus_static_se'])}</td></tr>")(
+                sens[("calibrated", sg)], sens[("flat", sg)])
+            for sg in sigmas),
+        "@@SPEND_VERDICT@@": sp["verdict"], "@@SPEND_RULES@@": sp["rules"], "@@SPEND_REVISION@@": sp["revision"],
+        "@@TOKEN_ARIA@@": (f"Line chart of the marginal value of the first and second token across 18 half-innings, the first falling from "
+                           f"{token_vals[0]:.2f} to {token_vals[-1]:.2f} runs, with a flat reference at Savant's 0.20 runs"),
+        "@@BARS_ARIA@@": "Horizontal bars of runs per team-season: " + "; ".join(f"{sim_name.get(b['rule'], b['rule'])} {b['runs']:.1f}" for b in bars),
+        "@@UMP_RIGHT@@": f"{(1 - B['umpire_wrong_share']) * 100:.0f}",
+        "@@BELIEF_A@@": f"{B['a']:.2f}" if B["a"] is not None else "", "@@BELIEF_B@@": f"{B['b']:.2f}" if B["b"] is not None else "",
+        "@@OBS_OT@@": f"{obs['overturn_rate']*100:.0f}", "@@OBS_CHAL@@": f"{obs['challenges_per_team_game']:.2f}",
+        "@@OBS_WON@@": f"{int(obs['overturned']):,}",
+        "@@N_P06@@": f"{B['n_p_above_0_6']:,}", "@@N_OPP@@": f"{B['n_opportunities']:,}",
+        "@@CAL_GAP@@": f"{max(abs(q['mean_p'] - q['flip_rate']) for q in B['calibration_quintiles']) * 100:.1f}",
+        "@@SHARP_SIGMA@@": f"{data['guide']['cross_sigma']:.1f}" if data["guide"]["cross_sigma"] is not None else "the lowest level tried",
+        "@@SEED@@": str(B["seed"]), "@@LAMBDA@@": f"{B['lambda_per_team_half']:.2f}", "@@N_EXTRAS@@": f"{B['n_extras_games']:,}",
+        "@@RHO@@": f"{B['rho_extra_inning']:.2f}", "@@CAP@@": f"{MARGIN_CAP_IN:.0f}",
+        "@@R_CHASE@@": f"{f['r_chase']:+.2f}", "@@N_R_CHASE@@": str(f["n_r_chase"]),
         "@@EYES_ROWS@@": "".join(
             f"<tr><td>{r['label']}</td><td class=\"num\">{int(r['n'])}</td><td class=\"num\">{r['beta_judgment']:+.4f}</td><td class=\"num\">{r['se_hc1']:.4f}</td><td class=\"num\">{r['p_hc1']:.2f}</td></tr>"
             for r in data["eyes"]),
-        "@@DATA@@": json.dumps({"hitters": data["hitters"], "charts": data["charts"]}, separators=(",", ":")),
+        "@@DATA@@": json.dumps({"hitters": data["hitters"], "charts": data["charts"]}, separators=(",", ":"), allow_nan=False),
     }
-    # correlation for the sort section, from the hitters table itself
-    hh = pd.DataFrame(data["hitters"])
-    ref = hh[(hh.pa >= 150) & (hh.chal >= 8)]
-    rep["@@R_CHASE@@"] = f"{np.corrcoef(ref.judgment_z.astype(float), ref.chase_rate.astype(float))[0, 1]:+.2f}"
     for k, v in rep.items():
         html = html.replace(k, v)
     assert "@@" not in html, [s for s in html.split("@@")[1::2]][:5]
+    check_rendered(html)
     return html
+
+
+def check_rendered(html: str) -> None:
+    """No missing value may reach the page: no nan, None or undefined outside script code."""
+    text = re.sub(r"<script\b.*?</script>", "", html, flags=re.S)
+    bad = [m.group(0) for m in re.finditer(r"\b(?:[Nn]a[Nn]|None|undefined)\b", text)]
+    assert not bad, f"rendered brief contains {sorted(set(bad))}"
 
 
 def main() -> None:

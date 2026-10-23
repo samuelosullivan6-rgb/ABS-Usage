@@ -26,7 +26,7 @@ scripts/02_pull_statcast.py --season 2025             # for year-over-year chase
 scripts/03_pull_savant_leaderboards.py                # Savant ABS leaderboards (reference)
 scripts/04_build_pitch_table.py --season 2026         # pitch table + challenges + token state + geometry
 scripts/05_judgment.py                                # per-hitter judgment scores
-scripts/06_policy.py                                  # token value DP, replay vs Savant's static rule
+scripts/06_policy.py                                  # token value DP, static/dynamic/observed with SEs, seeds, sigma table
 scripts/07_eyes_vs_approach.py                        # the test
 ```
 
@@ -46,7 +46,7 @@ Raw data lives in `data/raw/` (gitignored, about 2 GB), processed tables in `dat
 | `zone.py` | Mid-plate trajectory solve, signed edge distance, ABS strike rule; tested against Savant's embedded challenge table |
 | `savant.py` | Daily Statcast CSV pulls, ABS leaderboard CSV |
 | `judgment.py` | Hierarchical logit of challenge on true edge distance: random slope is perceptual sharpness, random intercept is the criterion; empirical-Bayes shrinkage; signal-detection d-prime alongside |
-| `policy.py` | Stake table from Statcast run values, overturn curve, token value by backward induction, replay of observed challenges under static and dynamic pricing |
+| `policy.py` | Stake table from Statcast run values, calibrated and flat-prior beliefs, token value by backward induction with an extra-innings continuation, game-by-game policy simulation with paired standard errors |
 | `chase.py` | Hitter-season chase and two-strike outcomes against the true ABS zone, plus a rulebook-zone chase rate for cross-season comparison |
 | `models.py` | The pooled-covariate regressions with chase-rate quintile controls, stratified contrasts, hitter bootstrap, split-half reliability |
 
@@ -90,26 +90,55 @@ With 20 or more challenges in a season the eyes score is as reliable as the crit
 
 ![token value](docs/figures/token_value.png)
 
-Opportunities (taken pitches within three inches of the edge, both sides) arrive 1.32 times per team-half-inning and the umpire misses 20% of them. The league judgment slope implies perceptual noise of about 2.6 inches. Pricing a token by backward induction gives:
+Opportunities (taken pitches within three inches of the edge, both sides) arrive 1.34 times per team-half-inning played and the umpire misses 20% of them. The league judgment slope implies perceptual noise of about 2.6 inches (an upper bound, decision 9). A simulated challenger perceives the true edge plus that noise and believes the call will flip with the calibrated probability P(flip | perceived edge), a logit fit on the opportunities with the same noise draw (decision 17). That belief knows the umpire is right on four near-edge calls in five; in every quintile it is within 0.3 points of the true flip rate.
+
+Pricing a token by backward induction, with extra innings as a continuation value (decision 18):
 
 | State | First token | Second token |
 |---|---|---|
-| Start of game | 0.49 runs | 0.23 runs |
-| Start of 5th | 0.33 | 0.15 |
-| Start of 9th | 0.10 | 0.03 |
+| Start of game | 0.15 runs | 0.09 runs |
+| Start of 5th | 0.11 | 0.07 |
+| Start of 9th | 0.04 | 0.02 |
+| Start of an extra inning (given the game is in one) | 0.04 | 0.02 |
 
-Savant's flat 0.20 is right for the first token around the sixth inning and for the second around the second. Early in the game the static rule challenges too readily; late it hoards.
+At league-average eyes a token is worth less than Savant's flat 0.20 at every moment of the game, so Savant's breakeven rule is too stingy throughout, and more so late. The direction depends on the noise level (table below): with noise below about 1.8 inches the first token at first pitch is worth more than 0.20.
 
-Playing every game forward with each rule, deciding on a perceived edge with league-average noise and scoring on the true ABS outcome:
+Playing every game forward with each rule, deciding on a perceived edge and scoring on the true ABS outcome (runs per team per 162 games; differences paired by game over 2,429 games, plus or minus one standard error; noise draw 0):
 
-| Rule | Challenges per team-game | Overturned | Runs per team per 162 |
-|---|---|---|---|
-| Static (Savant breakeven) | 3.10 | 39.5% | 32.6 |
-| Dynamic (this repo) | 3.29 | 40.0% | 35.2 |
-| Observed behavior | 2.04 | 54.1% | 32.9 |
-| Oracle (perfect eyes) | 4.81 | 100% | 111.1 |
+| Rule | Eyes | Challenges per team-game | Overturned | Runs per team per 162 | vs static | vs observed |
+|---|---|---|---|---|---|---|
+| Static (Savant breakeven) | simulated | 0.75 | 53.9% | 19.1 | | −13.8 ± 0.6 |
+| Dynamic (this repo) | simulated | 2.83 | 40.8% | 38.3 | +19.2 ± 0.5 | +5.5 ± 0.7 |
+| Observed behavior | real players | 2.04 | 54.1% | 32.9 | +13.8 ± 0.6 | |
+| Oracle (perfect eyes) | perfect | 4.81 | 100% | 111.1 | +92.0 ± 0.8 | +78.2 ± 0.8 |
 
-The dynamic rule is worth about 2.5 runs per team-season over either the static rule or what teams actually did, with the same eyes. That is the low-single-digit figure the research brief anticipated, and it confirms that most of Savant's "runs not taken" is rational token conservation rather than error. The gap between any rule and the oracle (about 75 runs) is the value of perception, which is where the per-player layer lives: the policy table in `policy_hitter_thresholds_mlb_2026.csv` states, for each hitter, how far off the plate a pitch must look before spending the last token (about 1.9 inches in the first inning for the sharpest hitters, 4.5 to 5.7 for the shallowest, near zero for everyone in the ninth).
+Across noise draws 0, 1 and 2, dynamic minus static is +19.2, +19.6 and +19.8 (SE 0.5 each) and dynamic minus observed +5.5, +5.7 and +6.3 (SE 0.7 each).
+
+**The observed row is not the same eyes.** Static and dynamic share the simulated league-average Gaussian noise. Observed is real players with their own eyes, who overturned 54% of 2.04 challenges a game. The noise model cannot produce that: under calibrated beliefs only 2,326 of 115,389 opportunities carry p above 0.6, yet players won 5,352 challenges. Real players hold information the noise model lacks, so the gap between either simulated rule and observed is not a property of the rule. The comparison the model supports is static against dynamic.
+
+The dynamic rule is worth about 19 runs per team-season over Savant's static rule with the same simulated eyes, because the static rule's 0.20 price makes a league-average challenger wait for a 51% chance on a typical pitch, which that challenger rarely has, so it challenges 0.75 times a game. The gap between any rule and the oracle is the value of perception, which is where the per-player layer lives: `policy_hitter_thresholds_mlb_2026.csv` states, for each hitter, how far off the plate a pitch must look before spending the last token at the median stake. Sharpest hitters need about 2.5 inches in the first inning; the median hitter 4.8; for 31% of rated hitters the margin is beyond six inches, which in practice means not to spend the last token early on a median-stakes pitch. In the ninth the median is 1.2 inches. These margins rest on a slope with split-half reliability near 0.3 at eight challenges and should be read to the nearest inch.
+
+**What changed on 2026-10-23.** The first version used the flat-prior belief Φ(perceived edge / σ), which ignores how often the umpire is right; a simulated p of 0.8 to 1.0 flipped 49% of the time. `scripts/06_policy.py --flat-prior` reproduces it (to `*_flatprior` files), and every run prints both:
+
+| Belief | First token, first pitch | Static: chal / overturned / runs | Dynamic: chal / overturned / runs | Dynamic − static | Dynamic − observed |
+|---|---|---|---|---|---|
+| Calibrated (current) | 0.150 | 0.75 / 53.9% / 19.1 | 2.83 / 40.8% / 38.3 | +19.2 ± 0.5 | +5.5 ± 0.7 |
+| Flat prior (before) | 0.491 | 3.10 / 39.5% / 32.6 | 3.24 / 40.5% / 35.4 | +2.8 ± 0.3 | +2.5 ± 0.7 |
+
+The previously published flat-prior figures (0.487, +2.65, +2.34) differ slightly from the second row because the DP now models extra innings and the arrival rate is per half-inning played rather than per scheduled half-inning. The advice reverses: the old table said to be stingy early and aggressive late; with coherent beliefs a token is worth less than Savant's price all game.
+
+**Sensitivity to the noise level** (noise draw 0; `policy_sigma_mlb_2026.csv`):
+
+| Noise σ (in) | Calibrated: first token | Static runs | Dynamic runs | Dynamic − static | Flat prior: first token | Dynamic − static |
+|---|---|---|---|---|---|---|
+| 1.0 | 0.318 | 60.9 | 69.8 | +9.0 ± 0.4 | 0.458 | +2.2 ± 0.4 |
+| 1.5 | 0.232 | 41.4 | 55.0 | +13.6 ± 0.5 | 0.457 | +1.9 ± 0.4 |
+| 2.0 | 0.183 | 28.5 | 45.4 | +16.9 ± 0.5 | 0.470 | +2.7 ± 0.4 |
+| 2.63 (league) | 0.150 | 19.1 | 38.3 | +19.2 ± 0.5 | 0.491 | +2.8 ± 0.3 |
+| 3.5 | 0.128 | 12.0 | 33.6 | +21.6 ± 0.6 | 0.514 | +3.0 ± 0.3 |
+| 4.5 | 0.115 | 8.6 | 31.2 | +22.5 ± 0.6 | 0.535 | +2.4 ± 0.3 |
+
+Under the flat prior the conclusion was insensitive to σ and entirely driven by the belief model. Under calibrated beliefs σ matters: the sharper the eyes, the more a token is worth and the smaller the gain from dynamic pricing, because Savant's 0.20 is then close to right early in the game.
 
 ### The eyes-versus-approach test
 
@@ -171,7 +200,7 @@ Every chase-quality point estimate leans the wrong way (sharper eyes, slightly c
 - `club_brief_2026.html` is the web version (publish it as a shareable page).
 - `club_brief_2026_standalone.html` opens locally and can be attached to an email.
 
-Part one is for the dugout: when to spend a token (thresholds by inning, tokens held and stake, in percent and in inches for an average eye), per-hitter challenge cards with a team selector (challenges, overturns, eyes and criterion percentiles, and the perceived margin each hitter should want before challenging early, mid-game and in the ninth), and the eyes-versus-approach sort. Part two is the evidence: the psychometric curve, reliability by challenge volume, the policy simulation, the test results, and methods. Every table names the processed file it came from, so the page regenerates on a new season with `scripts/run_pipeline.sh` followed by this script.
+Part one is for the dugout: when to spend a token (thresholds by inning, tokens held and stake, in percent and in inches for an average eye), per-hitter challenge cards with a team selector (challenges, overturns, eyes and criterion percentiles, and the perceived margin each hitter should want before challenging early, mid-game and in the ninth), and the eyes-versus-approach sort. Part two is the evidence: the psychometric curve, reliability by challenge volume, the policy simulation with paired standard errors and noise draws, the belief-model comparison and the σ table, the test results, and methods. The brief generator refuses to write a page that shows nan, None or undefined outside script code. Every table names the processed file it came from, so the page regenerates on a new season with `scripts/run_pipeline.sh` followed by this script.
 
 ## Limits
 
@@ -179,3 +208,7 @@ Part one is for the dugout: when to spend a token (thresholds by inning, tokens 
 - Judgment is measured on takes near the edge and may not transfer to pitches hitters chase, which are often further off the plate. That is the test, not an assumption.
 - The 2025 Triple-A feed has the same challenge structure but omits the initiating player.
 - The Statcast join covers Statcast-equipped parks only; the feed geometry covers every pitch.
+- The policy simulation gives every challenger league-average Gaussian eyes. Real players do better than that model on the challenges they make (54% overturned), so the observed row is context, not a comparison of rules.
+- Under calibrated beliefs the token's value depends on the noise level σ, and σ = 1.7 / slope is an upper bound. If the true league noise is below about 1.8 inches, the first token early is worth more than Savant's 0.20 and the early-game advice moves back toward Savant's rule.
+- The DP prices the token at the start of each half-inning, plays all 18 half-innings in every game, and treats run stakes as independent of the score. Run units, not win probability.
+- Per-hitter margins use each hitter's own σ from a slope with reliability near 0.3 at eight challenges; they are mostly the prior for infrequent challengers.

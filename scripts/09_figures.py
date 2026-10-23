@@ -62,7 +62,7 @@ def token_value(label: str) -> None:
     ax.set_xticklabels([f"{(h + 1) // 2 + 1}{'T' if h % 2 == 0 else 'B'}" for h in range(0, 18, 2)])
     ax.set_xlabel("half-inning")
     ax.set_ylabel("runs")
-    ax.set_title("What a held challenge token is worth, by game state", fontsize=11)
+    ax.set_title("What a held challenge token is worth (calibrated beliefs, league-average eyes)", fontsize=11)
     ax.legend(frameon=False, fontsize=8)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)

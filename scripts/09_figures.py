@@ -29,9 +29,10 @@ def psychometric(label: str) -> None:
     off = prior.get("fixed_offset_mean", 0.0)  # average count/leverage shift, so curves are marginal
     J = pd.read_csv(PROCESSED / f"judgment_{label}.csv")
     J = J[(J.n_decisions >= 150) & (J.n_challenges >= 8)]
-    x = np.linspace(-4, 4, 200)
+    lo, hi = prior.get("edge_window", [-4, 4])
+    x = np.linspace(lo, hi, 200)
     fig, ax = plt.subplots(figsize=(7, 4.2), dpi=160)
-    ax.axvspan(-4, 0, color="#eef1f6", lw=0)
+    ax.axvspan(lo, 0, color="#eef1f6", lw=0)
     ax.scatter(c.edge_mid, c.challenge_rate, s=np.sqrt(c.n) * 1.6, color=INK, zorder=3, label="observed, by half-inch bin")
     ax.plot(x, expit(a + off + b * x), color=INK, lw=2, label=f"league curve, slope {b:.2f}/in")
     for name, col in ((J.nlargest(1, "slope"), ACCENT), (J.nsmallest(1, "slope"), MUTED)):

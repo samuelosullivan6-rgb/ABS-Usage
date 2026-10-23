@@ -27,7 +27,7 @@ def main() -> None:
     ap.add_argument("--min-decisions", type=int, default=60)
     ap.add_argument("--min-pa", type=int, default=150)
     ap.add_argument("--min-challenges", type=int, default=8,
-                    help="slope reliability rises steeply with challenges: ~0.3 at 8+, ~0.8 at 20+ per season")
+                    help="the slope is unidentified for rare challengers; its reliability, with intervals, is in reliability_checks_<label>.csv")
     a = ap.parse_args()
 
     pt = pd.read_parquet(PROCESSED / f"pitch_table_{a.label}.parquet")

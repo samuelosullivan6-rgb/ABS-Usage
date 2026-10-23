@@ -17,21 +17,27 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from abs_judgment.config import PROCESSED, ROOT  # noqa: E402
+from abs_judgment.judgment import EDGE_WINDOW_IN, build_decision_table, eyes_label_threshold  # noqa: E402
 from abs_judgment.policy import interp_belief, perceived_margin  # noqa: E402
 
 LOGIT_TO_PROBIT = 1.7
 STAKES = [("0-0 count, bases empty", 0.05), ("typical pitch", 0.19), ("3-2 count, runners on", 0.50)]
 BANDS = [("1st to 3rd", 1), ("4th to 6th", 7), ("7th and 8th", 13), ("9th", 17)]
 MARGIN_CAP_IN = 6.0  # margins beyond this are shown as ">6": no pitch looks that far off often enough to matter
+EYES_SHOW_MIN = 8  # below this many challenges the slope is mostly the prior and the criterion; no eyes range is shown
+RELIABLE_FLOOR = 0.5  # an eyes label needs the lower end of the slope's reliability interval at or above this
+CRIT_LABELS = ("Chaser, free with tokens", "Chaser, sparing with tokens")
 SAVANT_PRICE = 0.2
 REPORT = ROOT / "report"
 
 
 def pct_rank(ref: pd.Series, x: pd.Series) -> pd.Series:
     ref = np.sort(ref.dropna().to_numpy())
-    return pd.Series(np.searchsorted(ref, x.to_numpy(), side="right") / len(ref) * 100, index=x.index)
+    out = pd.Series(np.searchsorted(ref, x.to_numpy(), side="right") / len(ref) * 100, index=x.index)
+    return out.where(x.notna())  # no score, no percentile
 
 
 def b64png(p: Path) -> str:
@@ -42,13 +48,15 @@ def build_data(label: str) -> dict:
     season = label.split("_")[1]
     pt = pd.read_parquet(PROCESSED / f"pitch_table_{label}.parquet",
                          columns=["batter_id", "half", "home_team", "away_team", "orig_called_strike",
-                                  "bat_tokens_before", "abs_edge_in", "batter_challenged"])
+                                  "bat_tokens_before", "bat_tokens_before_ruleB", "abs_edge_in", "batter_challenged",
+                                  "strikes_before", "balls_before", "inning", "bat_score", "fld_score",
+                                  "mid_x", "mid_z", "sz_top", "sz_bot"])
     pt["bat_abbr"] = np.where(pt.half == "top", pt.away_team, pt.home_team)
     team = pt.groupby("batter_id").bat_abbr.agg(lambda s: s.mode().iloc[0] if s.notna().any() else "")
     nteams = pt.groupby("batter_id").bat_abbr.nunique()
-    dec = pt[pt.orig_called_strike & (pt.bat_tokens_before >= 1) & pt.abs_edge_in.notna() & (pt.abs_edge_in.abs() <= 4)]
-    decision = {"n": int(len(dec)), "challenged": int(dec.batter_challenged.sum()),
-                "ump_wrong_share": float((dec.abs_edge_in > 0).mean())}
+    dec = build_decision_table(pt)  # the judgment model's own decision set and window
+    decision = {"n": int(len(dec)), "challenged": int(dec.y.sum()), "ump_wrong_share": float(dec.abs_ball.mean()),
+                "lo": float(-EDGE_WINDOW_IN[0]), "hi": float(EDGE_WINDOW_IN[1])}
 
     ch = pd.read_parquet(PROCESSED / f"challenges_{label}.parquet")
     gs = pd.read_csv(PROCESSED / f"game_summaries_{label}.csv")
@@ -68,6 +76,10 @@ def build_data(label: str) -> dict:
     ab_league = (belief["a"], belief["b"]) if model == "calibrated" else None
     res = pd.read_csv(PROCESSED / f"eyes_vs_approach_{label}.csv")
     relc = pd.read_csv(PROCESSED / f"reliability_checks_{label}.csv")
+    rel_primary = relc[relc.primary.astype(bool)].sort_values("min_challenges_per_half")
+    rel_before = relc[relc.model.str.startswith("before") & (relc.window_in == "-4..4")].set_index("min_challenges_per_half")
+    # the challenge count from which the data support an eyes-or-approach call (None: no volume this season does)
+    eyes_min = eyes_label_threshold(rel_primary, RELIABLE_FLOOR)
 
     sigma_league = belief["sigma_league"]
 
@@ -93,9 +105,13 @@ def build_data(label: str) -> dict:
     H["nteams"] = H.batter_id.map(nteams).fillna(1).astype(int)
     H["chal"] = H.batter_id.map(bat.chal).fillna(0).astype(int)
     H["won"] = H.batter_id.map(bat.won).fillna(0).astype(int)
-    ref = H[(H.pa >= 150) & (H.chal >= 8)]
-    H["eyes_pct"] = pct_rank(ref.judgment_z, H.judgment_z)
-    H["crit_pct"] = pct_rank(ref.criterion_z, H.criterion_z)
+    ref = H[(H.pa >= 150) & (H.chal >= EYES_SHOW_MIN)]
+    H["eyes_pct"] = pct_rank(ref.judgment_z, H.judgment_z)  # rank among rated regulars: the median split for an eyes label
+    # the eyes score as a range: posterior mean -/+ one posterior SD, as percentiles of the league's distribution of eyes
+    H["eyes_mid"] = 100 * norm.cdf(H.judgment_z)
+    H["eyes_lo"] = 100 * norm.cdf(H.judgment_z - H.judgment_z_sd)
+    H["eyes_hi"] = 100 * norm.cdf(H.judgment_z + H.judgment_z_sd)
+    H["crit_pct"] = pct_rank(H[(H.pa >= 150) & H.criterion_z.notna()].criterion_z, H.criterion_z)
     H["chase_pct"] = pct_rank(H[H.pa >= 150].chase_rate, H.chase_rate)
     H["sigma"] = LOGIT_TO_PROBIT / H.slope.clip(lower=0.05)
     ab_i = interp_belief(bgrid, H.sigma) if model == "calibrated" else None
@@ -107,19 +123,21 @@ def build_data(label: str) -> dict:
     def label_row(r) -> str:
         if r.pa < 150:
             return "Small sample"
-        if r.chal < 8 or pd.isna(r.judgment_z):
-            return "Eyes not rated"
+        if pd.isna(r.judgment_z):
+            return "Not rated"
         if r.chase_pct >= 60:
-            return "Eyes case" if r.eyes_pct < 50 else "Approach case"
+            if eyes_min is not None and r.chal >= eyes_min:
+                return "Eyes case" if r.eyes_pct < 50 else "Approach case"
+            # below the volume the eyes score can support, sort on the criterion, which is reliable
+            return CRIT_LABELS[0] if r.crit_pct >= 50 else CRIT_LABELS[1]
         if r.chase_pct <= 40:
             return "Disciplined"
         return "Average chaser"
 
     H["label"] = H.apply(label_row, axis=1)
-    H["provisional"] = H.chal < 15
-    keep = ["batter_id", "batter_name", "team", "nteams", "pa", "chal", "won", "n_decisions", "judgment_z", "eyes_pct",
-            "criterion_z", "crit_pct", "sigma", "chase_rate", "chase_pct", "k_rate", "bb_rate",
-            "m_early2", "m_early1", "m_mid1", "m_late1", "label", "provisional"]
+    keep = ["batter_id", "batter_name", "team", "nteams", "pa", "chal", "won", "n_decisions", "judgment_z", "judgment_z_sd",
+            "eyes_mid", "eyes_lo", "eyes_hi", "criterion_z", "crit_pct", "sigma", "chase_rate", "chase_pct", "k_rate", "bb_rate",
+            "m_early2", "m_early1", "m_mid1", "m_late1", "label"]
     hitters = H[keep].sort_values(["team", "batter_name"])
     hitters = hitters.replace({np.nan: None}).to_dict("records")
     for r in hitters:
@@ -160,7 +178,11 @@ def build_data(label: str) -> dict:
     tvx_path = PROCESSED / f"token_value_extras_{label}.csv"
     guide["extras_tok1"] = float(pd.read_csv(tvx_path).query("tokens == 1 and half == 'top'").token_value.iloc[0]) if tvx_path.exists() else None
     eyes_rows = res[["outcome", "n", "beta_judgment", "se_hc1", "p_hc1", "label"]].round(4).to_dict("records")
-    rel_rows = relc[relc.window_in == "-4..4"][["min_challenges_per_half", "n", "slope", "intercept"]].round(3).to_dict("records")
+    rel_rows = [{**r, "before_slope": float(rel_before.slope.get(r["min_challenges_per_half"], np.nan)),
+                 "before_lo": float(rel_before.slope_lo.get(r["min_challenges_per_half"], np.nan)),
+                 "before_hi": float(rel_before.slope_hi.get(r["min_challenges_per_half"], np.nan))}
+                for r in rel_primary[["min_challenges_per_half", "n", "slope", "slope_lo", "slope_hi",
+                                      "intercept", "intercept_lo", "intercept_hi"]].to_dict("records")]
     yoy = res[res.outcome == "chase_rate_given_prev"]
     yoy_row = yoy.iloc[0].to_dict() if len(yoy) else None
 
@@ -183,7 +205,7 @@ def build_data(label: str) -> dict:
             {"name": bot.batter_name, "a": round(float(bot.intercept) + off, 4), "b": round(float(bot.slope), 4)},
         ],
     }
-    refh = H[(H.pa >= 150) & (H.chal >= 8) & H.judgment_z.notna()]  # the hitters the sort can rate
+    refh = H[(H.pa >= 150) & (H.chal >= EYES_SHOW_MIN) & H.judgment_z.notna()]  # the hitters with an eyes range
     m, b0 = np.polyfit(refh.judgment_z, refh.chase_rate, 1)
     scatter = {
         "points": [{"id": int(r.batter_id), "name": r.batter_name, "x": round(float(r.judgment_z), 3),
@@ -208,6 +230,9 @@ def build_data(label: str) -> dict:
             "decision": decision, "sigma_league": sigma_league, "slope": prior["mean"][1],
             "slope_sd": float(np.sqrt(prior["var"][1])), "crit_sd": float(np.sqrt(prior["var"][0])),
             "fixed": prior["fixed"], "reliability": prior.get("reliability_full_season", {}),
+            "prior_corr": float(prior.get("corr", 0.0)), "post_corr_median": float(prior.get("post_corr_median", 0.0)),
+            "direction_test": prior.get("direction_test") or {"chi2_slopes": 0.0, "bic_penalty_slopes": 0.0},
+            "eyes_min": eyes_min, "rel_primary": rel_primary.to_dict("records"),
             "n_scored": int(len(J)), "n_ref": int(len(ref)),
             "token_first_start": dv(1, 1), "token_second_start": dv(1, 2), "token_first_9th": dv(17, 1),
             "belief": belief, "r_chase": float(np.corrcoef(refh.judgment_z, refh.chase_rate)[0, 1]), "n_r_chase": int(len(refh)),
@@ -299,6 +324,8 @@ tr:last-child td{border-bottom:0}
 .pill.approach{border-color:var(--accent);color:var(--accent)}
 .pill.disc{border-color:var(--ot);color:var(--ot)}
 .pill.prov{background:var(--warn-bg);color:var(--warn-fg);border-color:transparent}
+.pill.crit{border-style:dashed;border-color:var(--accent);color:var(--accent)}
+.pill.crit2{border-style:dashed;border-color:var(--muted);color:var(--muted)}
 .ot{color:var(--ot);font-weight:600}.cf{color:var(--cf);font-weight:600}
 .callout{background:var(--warn-bg);color:var(--warn-fg);padding:12px 14px;border-radius:6px;font-size:14px;max-width:none}
 .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:end}
@@ -358,19 +385,19 @@ a{color:var(--accent)}
 <section id="cards">
   <h2>Hitter challenge cards</h2>
   <p>Every called strike a hitter takes with a token in hand is a test of his eyes: the true location is known, and he either challenges or he doesn't. The <b>eyes</b> score is how sharply his challenge rate rises as the pitch moves from inside the zone to outside it, against the league. The <b>criterion</b> is how freely he spends tokens. The margins are how far off the plate a pitch should look <em>to him</em> before he challenges on a typical pitch, early with both tokens, early with the last token, mid-game, and in the 9th.</p>
-  <div class="callout">Read the eyes score with its sample. Below 15 challenges it is provisional (marked). Below 8 it is not shown. Willingness to challenge is a stable trait within a season; accuracy becomes reliable at about 20 challenges.</div>
+  <div class="callout">@@CARD_CALLOUT@@</div>
   <div class="controls">
     <label>Team<select id="team"><option value="">All teams</option>@@TEAM_OPTS@@</select></label>
     <label>Search<input id="q" type="search" placeholder="hitter name" autocomplete="off"></label>
-    <label>Sort<select id="sort"><option value="batter_name">Name</option><option value="eyes_pct">Eyes (best first)</option><option value="chase_pct">Chase rate (highest first)</option><option value="chal">Challenges</option><option value="crit_pct">Spends tokens (freest first)</option></select></label>
+    <label>Sort<select id="sort"><option value="batter_name">Name</option><option value="eyes_mid">Eyes (best first)</option><option value="chase_pct">Chase rate (highest first)</option><option value="chal">Challenges</option><option value="crit_pct">Spends tokens (freest first)</option></select></label>
     <label class="check"><input id="rated" type="checkbox"> Only hitters with 15+ challenges</label>
   </div>
   <div class="tablebox"><table id="cards-table"><thead><tr>
-    <th>Hitter</th><th>Team</th><th class="num">PA</th><th class="num">Chal</th><th class="num">Won</th><th class="num">Eyes pct</th><th class="num">Spends pct</th><th class="num">Chase %</th><th class="num">Chase pct</th><th class="num">Early, 2 tok</th><th class="num">Early, last</th><th class="num">Mid, last</th><th class="num">9th, last</th><th>Sort</th>
+    <th>Hitter</th><th>Team</th><th class="num">PA</th><th class="num">Chal</th><th class="num">Won</th><th class="num">Eyes range</th><th class="num">Spends pct</th><th class="num">Chase %</th><th class="num">Chase pct</th><th class="num">Early, 2 tok</th><th class="num">Early, last</th><th class="num">Mid, last</th><th class="num">9th, last</th><th>Sort</th>
   </tr></thead><tbody id="cards-body"></tbody></table></div>
-  <div class="legend"><span><b>Won</b> = call overturned</span><span><b>Eyes pct</b> = percentile of perceptual sharpness among @@NREF@@ regulars with 8+ challenges</span><span><b>Spends pct</b> = percentile of willingness to challenge</span><span>Margins in inches off the plate on a typical pitch; &gt;6 means no pitch looks far enough off to be worth it</span></div>
+  <div class="legend"><span><b>Won</b> = call overturned</span><span><b>Eyes range</b> = percentile band of perceptual sharpness among the league's hitters, the posterior mean plus or minus one SD; shown from @@EYES_SHOW_MIN@@ challenges</span><span><b>Spends pct</b> = percentile of willingness to challenge among @@N_CRIT_REF@@ regulars</span><span>Margins in inches off the plate on a typical pitch; &gt;6 means no pitch looks far enough off to be worth it</span></div>
   <p class="src" id="count"></p>
-  <p class="src">Source: judgment_@@LABEL@@.csv, hitter_season_@@LABEL@@.csv, challenges_@@LABEL@@.parquet, token_value_@@LABEL@@.csv, policy_belief_@@LABEL@@.json. Team is the hitter's most frequent batting team. A margin rests on the hitter's eyes slope, which is mostly noise below 20 challenges; read it to the nearest inch.</p>
+  <p class="src">Source: judgment_@@LABEL@@.csv, hitter_season_@@LABEL@@.csv, challenges_@@LABEL@@.parquet, token_value_@@LABEL@@.csv, policy_belief_@@LABEL@@.json. Team is the hitter's most frequent batting team. A margin rests on the hitter's eyes slope, which is mostly noise at the volumes one season gives; read it to the nearest inch.</p>
 </section>
 
 <section id="sort">
@@ -378,14 +405,14 @@ a{color:var(--accent)}
   <div class="grid2">
     <div style="display:grid;gap:12px">
       <p>A hitter who chases has one of two problems. Either he does not see the pitch well enough to know it is a ball, or he sees it fine and swings anyway. The fix differs: pitch-recognition work for the first, a count plan for the second. Chase rate alone cannot separate them because every swing mixes perception with intent. The challenge decision on a take has no swing in it.</p>
-      <p>The sort in the cards uses both: a hitter in the top 40% of chase rate with a below-median eyes score is an <span class="pill eyes">Eyes case</span>; the same chaser with an above-median eyes score is an <span class="pill approach">Approach case</span>. Hitters in the bottom 40% of chase rate are <span class="pill disc">Disciplined</span>.</p>
+      <p>@@SORT_RULE@@</p>
       <div class="stats">@@LABEL_STATS@@</div>
       <p><b>What the evidence supports.</b> Sharper eyes on takes go with chasing less (correlation @@R_CHASE@@ across the @@N_R_CHASE@@ rated regulars, stronger among frequent challengers) and with cutting the chase rate from the prior season. They do <em>not</em> go with cheaper chases, better two-strike contact or fewer strikeouts once chase rate is held fixed. So the sort tells you which lever moves the <em>rate</em>; it does not say who pays most per chase.</p>
     </div>
     <figure class="viz" id="viz-scatter">
       <div class="viz-head"><div class="viz-title">Eyes on takes against chasing on swings, @@SEASON@@ regulars</div></div>
       <div class="viz-plot" role="img" aria-label="Scatter of each regular's challenge judgment score against his chase rate, with a downward fitted line and guides marking the eyes-case and approach-case regions"></div>
-      <figcaption>One dot per hitter with 150+ PA and 8+ challenges. Hover a dot, or focus the chart and use the arrow keys, to see who it is. The hitter cards above are the table view.</figcaption>
+      <figcaption>One dot per hitter with 150+ PA and @@EYES_SHOW_MIN@@+ challenges; each dot is a posterior mean with an SD of about @@Z_SD@@ on this scale. @@SCATTER_NOTE@@ Hover a dot, or focus the chart and use the arrow keys, to see who it is. The hitter cards above are the table view.</figcaption>
     </figure>
   </div>
 </section>
@@ -396,7 +423,7 @@ a{color:var(--accent)}
   <div class="stats">
     <div class="stat"><b>@@CHALLENGES@@</b><span>challenges in @@GAMES@@ games, all recovered at the pitch level</span></div>
     <div class="stat"><b>@@OT_ALL@@%</b><span>overturned overall; batters @@OT_BAT@@%, catchers @@OT_CAT@@%</span></div>
-    <div class="stat"><b>@@UMP_WRONG@@%</b><span>of called strikes within 4 in of the edge were actually balls</span></div>
+    <div class="stat"><b>@@UMP_WRONG@@%</b><span>of called strikes from @@W_LO@@ in inside to @@W_HI@@ in outside the edge were actually balls</span></div>
     <div class="stat"><b>@@DEC_RATE@@%</b><span>of those were challenged by the hitter</span></div>
   </div>
   <div class="grid2">
@@ -409,9 +436,9 @@ a{color:var(--accent)}
     </figure>
     <div style="display:grid;gap:12px">
       <h3>Measurement</h3>
-      <p>A hierarchical logit of challenge on true edge distance gives each hitter a slope (eyes) and an intercept (criterion). League slope @@SLOPE@@ per inch; between-hitter spread @@SLOPE_SD@@ on the slope and @@CRIT_SD@@ on the criterion. Two strikes shift the criterion by @@FX_2K@@ logits; a late inning by @@FX_LATE@@.</p>
-      <div class="tablebox"><table><thead><tr><th>Min challenges per half-season</th><th class="num">Hitters</th><th class="num">Eyes reliability</th><th class="num">Criterion reliability</th></tr></thead><tbody>@@REL_ROWS@@</tbody></table></div>
-      <p class="src">Split-half reliability, Spearman-Brown to a full season. Source: reliability_checks_@@LABEL@@.csv.</p>
+      <p>A hierarchical logit of challenge on true edge distance gives each hitter a slope (eyes) and an intercept (criterion), net of the side of the box the pitch missed on: at the same distance a low called strike is challenged far more often than a high one (@@FX_BELOW@@ logits for a low pitch and @@FX_ABOVE@@ for a high one, against a pitch off the side; @@FX_CORNER@@ for a corner). League slope @@SLOPE@@ per inch; between-hitter spread @@SLOPE_SD@@ on the slope and @@CRIT_SD@@ on the criterion, correlated @@PRIOR_CORR@@ across hitters. Two strikes shift the criterion by @@FX_2K@@ logits; a late inning by @@FX_LATE@@.</p>
+      <div class="tablebox"><table><thead><tr><th>Min challenges per half</th><th class="num">Hitters</th><th class="num">Eyes</th><th class="num">Criterion</th><th class="num">Eyes, earlier model</th></tr></thead><tbody>@@REL_ROWS@@</tbody></table></div>
+      <p class="src">Eyes and criterion: split-half reliability, Spearman-Brown to a full season, with 95% intervals (Fisher z); hitters are those with the minimum in both halves. The earlier model had no direction and a diagonal prior, on a &plusmn;4 inch window. @@REL_NOTE@@ Source: reliability_checks_@@LABEL@@.csv.</p>
     </div>
   </div>
   <h3>Policy</h3>
@@ -444,11 +471,11 @@ a{color:var(--accent)}
   <dl>
     <dt>Data</dt><dd>MLB StatsAPI live feeds carry every ABS challenge at the pitch level with the initiating player and outcome (review type MJ). Per-team counts reconcile with the in-game token ledger in all but one game. Statcast CSVs supply run values and bat tracking, joined on every pitch.</dd>
     <dt>Zone</dt><dd>The feed's strike-zone bounds are the fixed ABS zone (53.5% and 27% of measured height). Ball location is solved at the plate midpoint from the nine-parameter trajectory; the signed edge distance uses a 2.9-inch ball and reproduces Savant's values exactly. It agrees with the ABS ruling on 99.99% of challenged pitches.</dd>
-    <dt>Decision set</dt><dd>Umpire-called strikes the hitter took with a token in hand, within 4 inches of the edge: @@DEC_N@@ pitches, @@DEC_CHAL@@ challenged.</dd>
-    <dt>Judgment model</dt><dd>Logit of challenge on edge distance with per-hitter random intercept and slope, fit by empirical Bayes; count, token and leverage shifters as fixed effects. The slope is unidentified for hitters who rarely challenge.</dd>
+    <dt>Decision set</dt><dd>Umpire-called strikes the hitter took with a token in hand (counting the extra-innings top-up), from @@W_LO@@ inches inside the edge to @@W_HI@@ outside: @@DEC_N@@ pitches, @@DEC_CHAL@@ challenged. The window is wider on the ball side because every batter challenge lies within @@W_HI@@ inches outside, and those pitches are the only view of the top half of the curve.</dd>
+    <dt>Judgment model</dt><dd>Logit of challenge on edge distance with a per-hitter random intercept and slope under a full-covariance prior, fit by two-step empirical Bayes; count, token and leverage shifters and the side of the box the pitch missed on (above, below, side, corner) as fixed effects. Direction-by-distance slopes were tested and left out (chi-square @@LR_SLOPES@@ on 3 df, below the BIC price of @@LR_BIC@@). A hitter's slope and intercept posteriors correlate @@POST_CORR@@ at the median. The slope is unidentified for hitters who rarely challenge.</dd>
     <dt>Token value</dt><dd>Backward induction over eight decision slots per half-inning for nine innings, with opportunities arriving at the observed rate (@@LAMBDA@@ per team-half-inning: taken pitches within 3 inches of the edge, both sides) and stakes from Statcast run expectancy. Extra innings enter as a continuation value at the last out of the 9th: @@N_EXTRAS@@ of @@GAMES@@ games went to the 10th, each extra inning is followed by another with probability @@RHO@@, and a team at zero gets one token back at the start of every extra inning, as the ledgers show. The simulated rules play the same token rule.</dd>
     <dt>Belief</dt><dd>A challenger perceives the true edge plus Gaussian noise and holds the calibrated posterior P(flip | perceived edge), a logit of the true flip on the perceived edge fit with the same noise draw. The per-hitter margins use the same fit at each hitter's own noise level.</dd>
-    <dt>Caveats</dt><dd>One season of ABS. Run units, not win probability, so late close games are undervalued. The simulated rules use league-average Gaussian perception; the observed row is real players, who know more than that model. Under calibrated beliefs the token's value depends on the noise level, which is an upper bound. The eyes score needs about 20 challenges to be reliable per hitter. Year-over-year judgment and outcome share a season.</dd>
+    <dt>Caveats</dt><dd>One season of ABS. Run units, not win probability, so late close games are undervalued. The simulated rules use league-average Gaussian perception; the observed row is real players, who know more than that model. Under calibrated beliefs the token's value depends on the noise level, which is an upper bound. @@EYES_CAVEAT@@ Year-over-year judgment and outcome share a season.</dd>
     <dt>Update</dt><dd>Rerun <code>scripts/run_pipeline.sh</code> and <code>scripts/11_club_brief.py</code> on the new season. Everything on this page regenerates from the processed tables named under each section.</dd>
   </dl>
 </section>
@@ -458,19 +485,19 @@ a{color:var(--accent)}
 const DATA = @@DATA@@;
 const fmt1 = v => v == null ? "" : v > @@CAP@@ ? "&gt;@@CAP@@" : (v > 0 ? "+" : "") + v.toFixed(1);
 const pct = v => v == null ? "" : Math.round(v);
-const pillClass = l => l === "Eyes case" ? "pill eyes" : l === "Approach case" ? "pill approach" : l === "Disciplined" ? "pill disc" : "pill";
+const pillClass = l => l === "Eyes case" ? "pill eyes" : l === "Approach case" ? "pill approach" : l === "Disciplined" ? "pill disc" : l === "@@CRIT_L0@@" ? "pill crit" : l === "@@CRIT_L1@@" ? "pill crit2" : "pill";
 const body = document.getElementById("cards-body");
 const teamSel = document.getElementById("team"), q = document.getElementById("q"), sortSel = document.getElementById("sort"), rated = document.getElementById("rated");
 function render(){
   const t = teamSel.value, s = q.value.trim().toLowerCase(), k = sortSel.value, onlyRated = rated.checked;
   let rows = DATA.hitters.filter(r => (!t || r.team === t) && (!s || r.batter_name.toLowerCase().includes(s)) && (!onlyRated || r.chal >= 15));
-  const desc = {eyes_pct:1, chase_pct:1, chal:1, crit_pct:1};
+  const desc = {eyes_mid:1, chase_pct:1, chal:1, crit_pct:1};
   rows.sort((a,b) => { const va = a[k], vb = b[k]; if (k === "batter_name") return va.localeCompare(vb); if (va == null) return 1; if (vb == null) return -1; return desc[k] ? vb - va : va - vb; });
   body.innerHTML = rows.map(r => {
-    const unrated = r.chal < 8 || r.eyes_pct == null;
-    const eyes = unrated ? "<span class='pill'>n/a</span>" : pct(r.eyes_pct) + (r.provisional ? " <span class='pill prov'>prov</span>" : "");
+    const unrated = r.chal < @@EYES_SHOW_MIN@@ || r.eyes_mid == null;
+    const eyes = unrated ? "<span class='pill'>n/a</span>" : pct(r.eyes_lo) + "&ndash;" + pct(r.eyes_hi);
     const m = v => unrated ? "" : fmt1(v);
-    return `<tr><td>${r.batter_name}</td><td>${r.team}${r.nteams > 1 ? " +" + (r.nteams-1) : ""}</td><td class="num">${r.pa}</td><td class="num">${r.chal}</td><td class="num"><span class="${r.won > r.chal - r.won ? "ot" : ""}">${r.won}</span></td><td class="num">${eyes}</td><td class="num">${unrated ? "" : pct(r.crit_pct)}</td><td class="num">${(r.chase_rate*100).toFixed(1)}</td><td class="num">${pct(r.chase_pct)}</td><td class="num">${m(r.m_early2)}</td><td class="num">${m(r.m_early1)}</td><td class="num">${m(r.m_mid1)}</td><td class="num">${m(r.m_late1)}</td><td><span class="${pillClass(r.label)}">${r.label}</span></td></tr>`;
+    return `<tr><td>${r.batter_name}</td><td>${r.team}${r.nteams > 1 ? " +" + (r.nteams-1) : ""}</td><td class="num">${r.pa}</td><td class="num">${r.chal}</td><td class="num"><span class="${r.won > r.chal - r.won ? "ot" : ""}">${r.won}</span></td><td class="num">${eyes}</td><td class="num">${r.crit_pct == null ? "" : pct(r.crit_pct)}</td><td class="num">${(r.chase_rate*100).toFixed(1)}</td><td class="num">${pct(r.chase_pct)}</td><td class="num">${m(r.m_early2)}</td><td class="num">${m(r.m_early1)}</td><td class="num">${m(r.m_mid1)}</td><td class="num">${m(r.m_late1)}</td><td><span class="${pillClass(r.label)}">${r.label}</span></td></tr>`;
   }).join("");
   document.getElementById("count").textContent = rows.length + " hitters shown of " + DATA.hitters.length + " with 100+ PA.";
 }
@@ -536,15 +563,15 @@ function keyNav(svg, n, getIdx, show, hide){ svg.addEventListener("keydown", e =
   responsive(plot, () => {
     const W = Math.max(280, plot.clientWidth), H = 320, m = {t: 22, r: Math.min(120, Math.max(70, W * 0.2)), b: 40, l: 44}, n = D.bins.length;
     plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
-    const x = v => m.l + (v + 4.25) / 8.5 * (W - m.l - m.r), y = v => m.t + (1 - v) * (H - m.t - m.b);
+    const XHI = @@W_HI@@ + 0.25, x = v => m.l + (v + 4.25) / (XHI + 4.25) * (W - m.l - m.r), y = v => m.t + (1 - v) * (H - m.t - m.b);
     el("rect", {x: x(-4.25), y: m.t, width: x(0) - x(-4.25), height: H - m.t - m.b, fill: "var(--viz-wash)"}, svg);
     txt(svg, x(-4.1), m.t + 12, "inside the ABS zone", "note"); txt(svg, x(0.15), m.t + 12, "outside", "note");
     [0, 0.25, 0.5, 0.75, 1].forEach(v => { el("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--viz-grid)"}, svg); txt(svg, m.l - 8, y(v) + 4, Math.round(v * 100) + "%", "tick", "end"); });
     el("line", {x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), stroke: "var(--viz-axis)"}, svg);
-    [-4, -2, 0, 2, 4].forEach(v => txt(svg, x(v), H - m.b + 18, (v > 0 ? "+" : "") + v + " in", "tick", "middle"));
+    [-4, -2, 0, 2, 4, 6, 8].filter(v => v <= @@W_HI@@).forEach(v => txt(svg, x(v), H - m.b + 18, (v > 0 ? "+" : "") + v + " in", "tick", "middle"));
     txt(svg, (m.l + W - m.r) / 2, H - 6, "true distance from the zone edge (ball edge to boundary)", "axis-label", "middle");
     D.bins.forEach(b => el("circle", {cx: x(b.x), cy: y(b.rate), r: (3 + Math.sqrt(b.n) / 14).toFixed(1), fill: S1, "fill-opacity": 0.35, stroke: "var(--surface)", "stroke-width": 2}, svg));
-    D.curves.forEach((c, k) => { const pts = []; for (let i = 0; i <= 80; i++){ const xv = -4 + i / 10; pts.push((i ? "L" : "M") + x(xv).toFixed(1) + "," + y(f(c, xv)).toFixed(1)); } el("path", {d: pts.join(""), fill: "none", stroke: colors[k], "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg); txt(svg, x(4) + 6, y(f(c, 4)) + 4, c.name, "dlabel"); });
+    D.curves.forEach((c, k) => { const pts = []; for (let i = 0; i <= (@@W_HI@@ + 4) * 10; i++){ const xv = -4 + i / 10; pts.push((i ? "L" : "M") + x(xv).toFixed(1) + "," + y(f(c, xv)).toFixed(1)); } el("path", {d: pts.join(""), fill: "none", stroke: colors[k], "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg); txt(svg, x(@@W_HI@@) + 6, y(f(c, @@W_HI@@)) + 4, c.name, "dlabel"); });
     const cross = el("line", {y1: m.t, y2: H - m.b, stroke: "var(--viz-axis)", visibility: "hidden"}, svg);
     const mark = el("circle", {r: 5, fill: S1, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden"}, svg);
     const hit = el("rect", {x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent"}, svg);
@@ -570,8 +597,8 @@ function keyNav(svg, n, getIdx, show, hide){ svg.addEventListener("keydown", e =
     txt(svg, (m.l + W - m.r) / 2, H - 6, "challenge judgment (z; higher = sharper eyes on takes)", "axis-label", "middle");
     el("line", {x1: x(D.x_cut), x2: x(D.x_cut), y1: m.t, y2: H - m.b, stroke: "var(--viz-axis)"}, svg);
     el("line", {x1: m.l, x2: W - m.r, y1: y(D.y_cut), y2: y(D.y_cut), stroke: "var(--viz-axis)"}, svg);
-    txt(svg, x(D.x_cut) - 6, m.t + 12, "Eyes case", "note", "end"); txt(svg, x(D.x_cut) + 6, m.t + 12, "Approach case", "note");
-    txt(svg, W - m.r, y(D.y_cut) + 14, "top 40% chase rate above this line", "note", "end");
+    txt(svg, x(D.x_cut) - 6, m.t + 12, "below-median eyes", "note", "end"); txt(svg, x(D.x_cut) + 6, m.t + 12, "above-median eyes", "note");
+    txt(svg, W - m.r, y(D.y_cut) - 6, "top 40% chase rate above this line", "note", "end");
     el("line", {x1: x(xlo), y1: y(D.fit.m * xlo + D.fit.b), x2: x(xhi), y2: y(D.fit.m * xhi + D.fit.b), stroke: "var(--viz-muted)", "stroke-width": 2, "stroke-linecap": "round"}, svg);
     txt(svg, x(xhi) - 4, y(D.fit.m * xhi + D.fit.b) - 8, "fit, r = " + D.fit.r.toFixed(2), "note", "end");
     const dots = P.map(p => el("circle", {cx: x(p.x), cy: y(p.y), r: 4, fill: S1, "fill-opacity": 0.65, stroke: "var(--surface)", "stroke-width": 2}, svg));
@@ -657,6 +684,58 @@ def pm(v: float, se: float) -> str:
     return f"{v:+.1f} ± {se:.1f}"
 
 
+def sgn(v: float) -> str:
+    return f"{v:+.2f}".replace("-", "\u2212")
+
+
+def ci(v: float, lo: float, hi: float) -> str:
+    return f"{max(v, 0):.2f} [{lo:.2f}, {hi:.2f}]"
+
+
+def eyes_text(data: dict) -> dict:
+    """The wording that depends on whether the eyes score can support a label this season."""
+    f = data["facts"]
+    em = f["eyes_min"]
+    rel = {int(r["min_challenges_per_half"]): r for r in f["rel_primary"]}
+    top = rel[max(rel)]
+    ten = rel.get(10, top)
+    crit0 = rel[0]
+    lab = data["label_counts"]
+    n_eyes = lab.get("Eyes case", 0) + lab.get("Approach case", 0)
+    crit_pills = (f'<span class="pill crit">{CRIT_LABELS[0]}</span> (spends tokens more freely than the median regular: aggressive on '
+                  f'challenges as well as swings, which points to the approach) or <span class="pill crit2">{CRIT_LABELS[1]}</span> '
+                  "(aggressive on swings only; whether the eyes are the reason stays open)")
+    if em is None:
+        rule = ("The sort uses chase rate and whichever judgment score the season can support. An eyes-or-approach call needs the eyes "
+                f"score's reliability to clear {RELIABLE_FLOOR:.1f} at the low end of its interval, and this season it does not at any volume "
+                f"tested: even among the {int(ten['n'])} hitters with {int(ten['min_challenges_per_half'])}+ challenges in each half it is "
+                f"{ci(ten['slope'], ten['slope_lo'], ten['slope_hi'])}. So no hitter is called an eyes case or an approach case. A hitter in the "
+                f"top 40% of chase rate is sorted on the criterion instead, which is reliable ({crit0['intercept']:.2f}): {crit_pills}. Hitters in "
+                'the bottom 40% of chase rate are <span class="pill disc">Disciplined</span>.')
+        callout = ("Read the eyes score as a range, not a rank: the band is the hitter's percentile among the league's hitters, plus or minus "
+                   f"one posterior SD. Below {EYES_SHOW_MIN} challenges it is not shown. Willingness to challenge (Spends pct) is a stable trait "
+                   f"within a season (reliability {crit0['intercept']:.2f}); accuracy is not yet measurable per hitter, so the sort below "
+                   "makes no eyes call this season.")
+        caveat = ("The eyes score is not reliable per hitter at any volume one season gives "
+                  f"({ci(ten['slope'], ten['slope_lo'], ten['slope_hi'])} at {int(ten['min_challenges_per_half'])}+ challenges per half), "
+                  "so it is shown as a range and drives no label.")
+        note = "No hitter carries an eyes-or-approach call; the vertical guide is the median eyes score."
+    else:
+        rule = ("The sort uses chase rate and whichever judgment score the sample can support. A hitter in the top 40% of chase rate with "
+                f"{em}+ challenges, the volume at which the eyes score's reliability clears {RELIABLE_FLOOR:.1f} at the low end of its interval, "
+                'is an <span class="pill eyes">Eyes case</span> with a below-median eyes score and an <span class="pill approach">Approach case</span> '
+                f"with an above-median one ({n_eyes} hitters). With fewer challenges he is sorted on the criterion, which is reliable: {crit_pills}. "
+                'Hitters in the bottom 40% of chase rate are <span class="pill disc">Disciplined</span>.')
+        callout = ("Read the eyes score as a range, not a rank: the band is the hitter's percentile among the league's hitters, plus or minus "
+                   f"one posterior SD. Below {EYES_SHOW_MIN} challenges it is not shown, and below {em} it drives no label. Willingness to "
+                   f"challenge (Spends pct) is a stable trait within a season (reliability {crit0['intercept']:.2f}).")
+        caveat = f"The eyes score supports a per-hitter call only from {em} challenges; below that it is shown as a range and drives no label."
+        note = f"Only hitters with {em}+ challenges carry an eyes-or-approach call."
+    rel_note = (f"An eyes label needs the lower end of the interval at {RELIABLE_FLOOR:.1f} or more: "
+                + ("no tested volume reaches it." if em is None else f"first reached at {em // 2} per half, so {em} a season."))
+    return {"@@SORT_RULE@@": rule, "@@CARD_CALLOUT@@": callout, "@@EYES_CAVEAT@@": caveat, "@@SCATTER_NOTE@@": note, "@@REL_NOTE@@": rel_note}
+
+
 def render(data: dict, label: str) -> str:
     f = data["facts"]
     B = f["belief"]
@@ -677,6 +756,14 @@ def render(data: dict, label: str) -> str:
         "@@GAMES@@": f"{f['games']:,}", "@@CHALLENGES@@": f"{f['challenges']:,}",
         "@@TOK1@@": f"{f['token_first_start']:.2f}", "@@TOK2@@": f"{f['token_second_start']:.2f}", "@@TOK9@@": f"{f['token_first_9th']:.2f}",
         "@@SIGMA@@": f"{f['sigma_league']:.1f}", "@@NREF@@": str(f["n_ref"]),
+        "@@N_CRIT_REF@@": str(sum(1 for r in data["hitters"] if r["pa"] >= 150 and r["criterion_z"] is not None)),
+        "@@EYES_SHOW_MIN@@": str(EYES_SHOW_MIN), "@@CRIT_L0@@": CRIT_LABELS[0], "@@CRIT_L1@@": CRIT_LABELS[1],
+        "@@W_LO@@": f"{f['decision']['lo']:g}", "@@W_HI@@": f"{f['decision']['hi']:g}",
+        "@@FX_ABOVE@@": sgn(f['fixed'].get('dir_above', 0)), "@@FX_BELOW@@": sgn(f['fixed'].get('dir_below', 0)),
+        "@@FX_CORNER@@": sgn(f['fixed'].get('dir_corner', 0)), "@@PRIOR_CORR@@": sgn(f['prior_corr']),
+        "@@POST_CORR@@": sgn(f['post_corr_median']),
+        "@@LR_SLOPES@@": f"{f['direction_test']['chi2_slopes']:.0f}", "@@LR_BIC@@": f"{f['direction_test']['bic_penalty_slopes']:.0f}",
+        "@@Z_SD@@": f"{np.median([r['judgment_z_sd'] for r in data['hitters'] if r['judgment_z_sd'] is not None and r['chal'] >= EYES_SHOW_MIN]):.1f}",
         "@@OT_ALL@@": f"{f['overturn_all']*100:.1f}", "@@OT_BAT@@": f"{f['roles']['batter']['ot']*100:.0f}", "@@OT_CAT@@": f"{f['roles']['catcher']['ot']*100:.0f}",
         "@@UMP_WRONG@@": f"{f['decision']['ump_wrong_share']*100:.0f}", "@@DEC_RATE@@": f"{f['decision']['challenged']/f['decision']['n']*100:.1f}",
         "@@DEC_N@@": f"{f['decision']['n']:,}", "@@DEC_CHAL@@": f"{f['decision']['challenged']:,}",
@@ -691,10 +778,14 @@ def render(data: dict, label: str) -> str:
             for r in data["dugout"]),
         "@@LABEL_STATS@@": "".join(
             f'<div class="stat"><b>{data["label_counts"].get(k, 0)}</b><span>{k}</span></div>'
-            for k in ("Eyes case", "Approach case", "Average chaser", "Disciplined", "Eyes not rated")),
+            for k in (("Eyes case", "Approach case") if f["eyes_min"] is not None else ()) + CRIT_LABELS
+            + ("Average chaser", "Disciplined", "Not rated")),
         "@@REL_ROWS@@": "".join(
-            f"<tr><td>{'none' if r['min_challenges_per_half']==0 else int(r['min_challenges_per_half'])}</td><td class=\"num\">{int(r['n'])}</td><td class=\"num\">{r['slope']:.2f}</td><td class=\"num\">{r['intercept']:.2f}</td></tr>"
+            f"<tr><td>{'none' if r['min_challenges_per_half']==0 else int(r['min_challenges_per_half'])}</td><td class=\"num\">{int(r['n'])}</td>"
+            f"<td class=\"num\">{ci(r['slope'], r['slope_lo'], r['slope_hi'])}</td><td class=\"num\">{ci(r['intercept'], r['intercept_lo'], r['intercept_hi'])}</td>"
+            f"<td class=\"num\">{ci(r['before_slope'], r['before_lo'], r['before_hi']) if r['before_slope'] == r['before_slope'] else ''}</td></tr>"
             for r in data["rel"]),
+        **eyes_text(data),
         "@@SIM_ROWS@@": "".join(
             f"<tr><td>{sim_name.get(r['rule'], r['rule'])}</td><td>{sim_eyes.get(r['rule'], '')}</td><td class=\"num\">{r['challenges_per_team_game']:.2f}</td>"
             f"<td class=\"num\">{'' if pd.isna(r['overturn_rate']) else f'{r['overturn_rate']*100:.0f}%'}</td><td class=\"num\">{r['runs_per_team_162']:.1f}</td>"

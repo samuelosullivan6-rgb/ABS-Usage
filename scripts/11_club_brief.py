@@ -131,7 +131,41 @@ def build_data(label: str) -> dict:
     yoy_row = yoy.iloc[0].to_dict() if len(yoy) else None
 
     teams = sorted({r["team"] for r in hitters if r["team"]})
+
+    # ---- chart series (drawn in the page; every chart also has a table view)
+    token_series = [{"h": int(r.half_inning), "inning": int(r.inning), "half": r.half,
+                     "t1": round(float(tv[(tv.half_inning == r.half_inning) & (tv.tokens == 1)].token_value.iloc[0]), 4),
+                     "t2": round(float(tv[(tv.half_inning == r.half_inning) & (tv.tokens == 2)].token_value.iloc[0]), 4)}
+                    for r in tv[tv.tokens == 1].sort_values("half_inning").itertuples()]
+    curve = pd.read_csv(PROCESSED / f"judgment_curve_{label}.csv")
+    off = prior.get("fixed_offset_mean", 0.0)
+    rated = J[(J.n_decisions >= 150) & (J.n_challenges >= 8)]
+    top, bot = rated.loc[rated.slope.idxmax()], rated.loc[rated.slope.idxmin()]
+    curve_data = {
+        "bins": [{"x": round(float(r.edge_mid), 2), "n": int(r.n), "rate": round(float(r.challenge_rate), 4)} for r in curve.itertuples()],
+        "curves": [
+            {"name": "League", "a": round(prior["mean"][0] + off, 4), "b": round(prior["mean"][1], 4)},
+            {"name": top.batter_name, "a": round(float(top.intercept) + off, 4), "b": round(float(top.slope), 4)},
+            {"name": bot.batter_name, "a": round(float(bot.intercept) + off, 4), "b": round(float(bot.slope), 4)},
+        ],
+    }
+    refh = H[(H.pa >= 150) & (H.chal >= 8) & H.judgment_z.notna()]
+    m, b0 = np.polyfit(refh.judgment_z, refh.chase_rate, 1)
+    scatter = {
+        "points": [{"id": int(r.batter_id), "name": r.batter_name, "x": round(float(r.judgment_z), 3),
+                    "y": round(float(r.chase_rate), 4), "label": r.label, "chal": int(r.chal)} for r in refh.itertuples()],
+        "fit": {"m": round(float(m), 4), "b": round(float(b0), 4), "r": round(float(np.corrcoef(refh.judgment_z, refh.chase_rate)[0, 1]), 3)},
+        "x_cut": round(float(refh.judgment_z.median()), 3),
+        "y_cut": round(float(H[H.pa >= 150].chase_rate.quantile(0.6)), 4),
+    }
+    order = ["static", "dynamic", "observed", "oracle"]
+    bars = sorted([{"rule": r["rule"], "runs": round(float(r["runs_per_team_162"]), 1),
+                    "chal": round(float(r["challenges_per_team_game"]), 2),
+                    "ot": None if pd.isna(r["overturn_rate"]) else round(float(r["overturn_rate"]), 3)}
+                   for r in sim_rows if r["rule"] in order], key=lambda b: order.index(b["rule"]))
+    charts = {"token": token_series, "curve": curve_data, "scatter": scatter, "bars": bars}
     return {
+        "charts": charts,
         "season": season,
         "facts": {
             "games": int(gs.game_pk.nunique()), "pitches": int(gs.n_pitches.sum()), "challenges": int(len(ch)),
@@ -156,13 +190,45 @@ TEMPLATE = r"""<title>ABS Challenge Club Brief</title>
   --bg:#f3f5f8; --surface:#ffffff; --fg:#15202e; --muted:#5b6878; --line:#d5dce6; --soft:#e9eef5;
   --accent:#1f4fd1; --accent-ink:#ffffff; --ot:#1b7f4c; --cf:#b3261e; --warn-bg:#fff3cf; --warn-fg:#6a4a00;
   --display:"Barlow Condensed","Arial Narrow",Arial,sans-serif; --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif; --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+  /* chart roles: categorical slots validated against this surface (light #ffffff, dark #161d29) */
+  --series-1:#2a78d6; --series-2:#eb6834; --series-3:#1baf7a;
+  --viz-grid:#e6eaf0; --viz-axis:#c9d1dc; --viz-muted:#6b7686; --viz-ink:#15202e; --viz-wash:#eef2f7;
 }
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
   --bg:#0f141d; --surface:#161d29; --fg:#e7ecf3; --muted:#9fabbc; --line:#2a3443; --soft:#1e2735;
-  --accent:#7ea2ff; --accent-ink:#0f141d; --ot:#4fc98c; --cf:#f28b7d; --warn-bg:#3a2f0d; --warn-fg:#f3d98b; color-scheme:dark } }
+  --accent:#7ea2ff; --accent-ink:#0f141d; --ot:#4fc98c; --cf:#f28b7d; --warn-bg:#3a2f0d; --warn-fg:#f3d98b; color-scheme:dark;
+  --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70;
+  --viz-grid:#232d3b; --viz-axis:#3a4656; --viz-muted:#9fabbc; --viz-ink:#e7ecf3; --viz-wash:#1c2532 } }
 :root[data-theme="dark"]{
   --bg:#0f141d; --surface:#161d29; --fg:#e7ecf3; --muted:#9fabbc; --line:#2a3443; --soft:#1e2735;
-  --accent:#7ea2ff; --accent-ink:#0f141d; --ot:#4fc98c; --cf:#f28b7d; --warn-bg:#3a2f0d; --warn-fg:#f3d98b; color-scheme:dark }
+  --accent:#7ea2ff; --accent-ink:#0f141d; --ot:#4fc98c; --cf:#f28b7d; --warn-bg:#3a2f0d; --warn-fg:#f3d98b; color-scheme:dark;
+  --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70;
+  --viz-grid:#232d3b; --viz-axis:#3a4656; --viz-muted:#9fabbc; --viz-ink:#e7ecf3; --viz-wash:#1c2532 }
+/* chart chrome */
+figure.viz{position:relative;border:1px solid var(--line);border-radius:6px;background:var(--surface);padding:12px 12px 8px;display:grid;gap:8px;min-width:0}
+figure.viz .viz-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap}
+figure.viz .viz-title{font-family:var(--body);font-weight:600;font-size:14px;color:var(--fg)}
+figure.viz .viz-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+figure.viz .viz-legend span{display:inline-flex;align-items:center;gap:6px}
+figure.viz .viz-legend i{display:inline-block;width:16px;height:2px;border-radius:1px}
+figure.viz .viz-legend i.dot{width:8px;height:8px;border-radius:50%}
+figure.viz .viz-plot{width:100%;min-width:0}
+figure.viz svg{display:block;width:100%;height:auto;font-family:var(--body);font-size:12px;overflow:visible}
+figure.viz svg:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+figure.viz .tick{fill:var(--viz-muted);font-variant-numeric:tabular-nums;font-size:11.5px}
+figure.viz .axis-label{fill:var(--viz-muted);font-size:11.5px}
+figure.viz .dlabel{fill:var(--viz-ink);font-size:12px;font-weight:600}
+figure.viz .note{fill:var(--viz-muted);font-size:11.5px}
+figure.viz details{font-size:12.5px;color:var(--muted)}
+figure.viz details summary{cursor:pointer;font-family:var(--mono);font-size:11.5px;letter-spacing:.04em;text-transform:uppercase}
+figure.viz details table{margin-top:6px;font-size:12.5px}
+figure.viz figcaption{font-size:13px;color:var(--muted);max-width:70ch}
+.tip{position:absolute;z-index:4;pointer-events:none;background:var(--surface);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font-size:12.5px;box-shadow:0 4px 14px rgba(0,0,0,.12);min-width:150px;max-width:260px}
+.tip .t{font-weight:600;margin-bottom:4px}
+.tip .row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.tip .row b{font-variant-numeric:tabular-nums}
+.tip .row span{color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.tip .row i{display:inline-block;width:12px;height:2px}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.5;padding-inline:16px;padding-block:0 48px}
 .wrap{max-width:1040px;margin:0 auto}
@@ -243,9 +309,12 @@ a{color:var(--accent)}
       </ol>
       <p class="src">Source: token_value_@@LABEL@@.csv (backward induction), stakes_@@LABEL@@.csv, policy_simulation_@@LABEL@@.csv.</p>
     </div>
-    <figure>
-      <img src="@@FIG_TOKEN@@" alt="Marginal value of the first and second challenge token by half-inning, falling from about half a run to near zero, against Savant's flat 0.20">
-      <figcaption>What a held token is worth, by half-inning. The dotted line is Savant's flat price.</figcaption>
+    <figure class="viz" id="viz-token">
+      <div class="viz-head"><div class="viz-title">What a held token is worth, by half-inning</div>
+        <div class="viz-legend"><span><i style="background:var(--series-1)"></i>First token</span><span><i style="background:var(--series-2)"></i>Second token</span><span><i style="background:var(--viz-axis)"></i>Savant's flat price</span></div></div>
+      <div class="viz-plot" role="img" aria-label="Line chart of the marginal value of the first and second token across 18 half-innings, both falling toward zero, with a flat reference at 0.20 runs"></div>
+      <figcaption>Runs. Hover or focus and use the arrow keys to read any half-inning.</figcaption>
+      <details><summary>Table view</summary><div class="tablebox"><table class="viz-table"></table></div></details>
     </figure>
   </div>
   <h3>How sure you need to be</h3>
@@ -281,9 +350,10 @@ a{color:var(--accent)}
       <div class="stats">@@LABEL_STATS@@</div>
       <p><b>What the evidence supports.</b> Sharper eyes on takes go with chasing less (correlation @@R_CHASE@@ across regulars, stronger among frequent challengers) and with cutting the chase rate from the prior season. They do <em>not</em> go with cheaper chases, better two-strike contact or fewer strikeouts once chase rate is held fixed. So the sort tells you which lever moves the <em>rate</em>; it does not say who pays most per chase.</p>
     </div>
-    <figure>
-      <img src="@@FIG_SCATTER@@" alt="Scatter of challenge judgment against chase rate for regulars, with a negative fitted line">
-      <figcaption>Eyes on takes against chasing on swings, @@SEASON@@ regulars.</figcaption>
+    <figure class="viz" id="viz-scatter">
+      <div class="viz-head"><div class="viz-title">Eyes on takes against chasing on swings, @@SEASON@@ regulars</div></div>
+      <div class="viz-plot" role="img" aria-label="Scatter of each regular's challenge judgment score against his chase rate, with a downward fitted line and guides marking the eyes-case and approach-case regions"></div>
+      <figcaption>One dot per hitter with 150+ PA and 8+ challenges. Hover a dot, or focus the chart and use the arrow keys, to see who it is. The hitter cards above are the table view.</figcaption>
     </figure>
   </div>
 </section>
@@ -298,9 +368,12 @@ a{color:var(--accent)}
     <div class="stat"><b>@@DEC_RATE@@%</b><span>of those were challenged by the hitter</span></div>
   </div>
   <div class="grid2">
-    <figure>
-      <img src="@@FIG_CURVE@@" alt="Probability a hitter challenges a called strike as a function of true edge distance, with the league curve and the sharpest and shallowest hitters">
-      <figcaption>The psychometric curve. Challenge rate rises smoothly from under 1% four inches inside the zone to about 40% three inches outside. It is a curve, not a step: at the edge itself hitters challenge only 11 to 14% of true balls.</figcaption>
+    <figure class="viz" id="viz-curve">
+      <div class="viz-head"><div class="viz-title">Challenge rate on called strikes, by true distance from the zone edge</div>
+        <div class="viz-legend" id="curve-legend"></div></div>
+      <div class="viz-plot" role="img" aria-label="Observed challenge rate by half-inch bin of true edge distance, rising from under 1 percent inside the zone to about 40 percent outside, with the fitted league curve and the sharpest and shallowest hitters' curves"></div>
+      <figcaption>Dots are observed half-inch bins, sized by pitch count. Curves are the fitted logits. The shaded band is inside the ABS zone. At the edge itself hitters challenge only 11 to 14% of true balls.</figcaption>
+      <details><summary>Table view</summary><div class="tablebox"><table class="viz-table"></table></div></details>
     </figure>
     <div style="display:grid;gap:12px">
       <h3>Measurement</h3>
@@ -311,6 +384,11 @@ a{color:var(--accent)}
   </div>
   <h3>Policy</h3>
   <p>Every game replayed with each rule, deciding on a perceived edge with league-average noise and scored on the true ABS outcome. Runs per team per 162 games.</p>
+  <figure class="viz" id="viz-bars">
+    <div class="viz-head"><div class="viz-title">Runs per team-season by challenge rule</div></div>
+    <div class="viz-plot" role="img" aria-label="Horizontal bars: the static rule, the dynamic rule and observed behavior each near 33 runs, and the oracle with perfect eyes at 111"></div>
+    <figcaption>The gap to the oracle is the value of perception; the gap between rules is the value of pricing the token.</figcaption>
+  </figure>
   <div class="tablebox"><table><thead><tr><th>Rule</th><th class="num">Challenges per team-game</th><th class="num">Overturned</th><th class="num">Runs per team-season</th></tr></thead><tbody>@@SIM_ROWS@@</tbody></table></div>
   <p class="src">Oracle challenges exactly the umpire's misses, the ceiling with perfect eyes. Observed is what players did on the same pitches. Source: policy_simulation_@@LABEL@@.csv.</p>
   <h3>The test</h3>
@@ -358,6 +436,131 @@ function render(){
 try { const saved = localStorage.getItem("abs-brief-team"); if (saved && [...teamSel.options].some(o => o.value === saved)) teamSel.value = saved; } catch (e) {}
 teamSel.addEventListener("change", () => { try { localStorage.setItem("abs-brief-team", teamSel.value); } catch (e) {} });
 render();
+
+// ---------- charts: built from DATA.charts; every chart has a hover layer and a table view ----------
+const NS = "http://www.w3.org/2000/svg";
+const S1 = "var(--series-1)", S2 = "var(--series-2)", S3 = "var(--series-3)";
+function el(tag, attrs, parent){ const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+function txt(parent, x, y, s, cls, anchor){ const t = el("text", {x, y, class: cls || "tick", "text-anchor": anchor || "start"}, parent); t.textContent = s; return t; }
+function ticks(lo, hi, n){ const span = hi - lo, mag = Math.pow(10, Math.floor(Math.log10(span / n))); const step = [1, 2, 2.5, 5, 10].map(c => c * mag).find(c => span / c <= n); const out = []; for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10)); return out; }
+const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; tip.setAttribute("role", "status"); document.body.appendChild(tip);
+function showTip(px, py, title, rows){
+  tip.replaceChildren(); const t = document.createElement("div"); t.className = "t"; t.textContent = title; tip.appendChild(t);
+  for (const r of rows){ const d = document.createElement("div"); d.className = "row"; const s = document.createElement("span"); if (r.color){ const i = document.createElement("i"); i.style.background = r.color; s.appendChild(i); } s.appendChild(document.createTextNode(r.label)); const b = document.createElement("b"); b.textContent = r.value; d.appendChild(s); d.appendChild(b); tip.appendChild(d); }
+  tip.hidden = false; const w = tip.offsetWidth, vw = document.documentElement.clientWidth;
+  let left = px + 14; if (left + w > vw - 8) left = px - w - 14; if (left < 8) left = 8;
+  tip.style.left = (left + window.scrollX) + "px"; tip.style.top = (py + window.scrollY - 8) + "px";
+}
+function hideTip(){ tip.hidden = true; }
+function fillTable(fig, head, rows){ const t = fig.querySelector(".viz-table"); if (!t) return; t.replaceChildren(); const th = document.createElement("thead"), tr = document.createElement("tr"); head.forEach((h, i) => { const c = document.createElement("th"); c.textContent = h; if (i) c.className = "num"; tr.appendChild(c); }); th.appendChild(tr); t.appendChild(th); const tb = document.createElement("tbody"); rows.forEach(r => { const q = document.createElement("tr"); r.forEach((v, i) => { const c = document.createElement("td"); c.textContent = v; if (i) c.className = "num"; q.appendChild(c); }); tb.appendChild(q); }); t.appendChild(tb); }
+function responsive(plot, draw){ draw(); if ("ResizeObserver" in window){ let w = plot.clientWidth; new ResizeObserver(() => { if (plot.clientWidth !== w){ w = plot.clientWidth; draw(); } }).observe(plot); } }
+function keyNav(svg, n, getIdx, show, hide){ svg.addEventListener("keydown", e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft"){ e.preventDefault(); const i = getIdx(); show(i < 0 ? 0 : Math.min(n - 1, Math.max(0, i + (e.key === "ArrowRight" ? 1 : -1)))); } else if (e.key === "Escape") hide(); }); svg.addEventListener("blur", hide); }
+
+// 1. token value: two-series line, reference level, crosshair tooltip
+(function(){
+  const fig = document.getElementById("viz-token"), plot = fig.querySelector(".viz-plot"), D = DATA.charts.token;
+  const lab = d => d.inning + (d.half === "top" ? "T" : "B");
+  fillTable(fig, ["Half-inning", "First token (runs)", "Second token (runs)"], D.map(d => [lab(d), d.t1.toFixed(3), d.t2.toFixed(3)]));
+  responsive(plot, () => {
+    const W = Math.max(280, plot.clientWidth), H = 300, m = {t: 18, r: 16, b: 34, l: 42}, n = D.length;
+    plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
+    const x = i => m.l + i / (n - 1) * (W - m.l - m.r), yMax = 0.55, y = v => m.t + (1 - v / yMax) * (H - m.t - m.b);
+    ticks(0, yMax, 5).forEach(v => { el("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--viz-grid)"}, svg); txt(svg, m.l - 8, y(v) + 4, v.toFixed(1), "tick", "end"); });
+    el("line", {x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), stroke: "var(--viz-axis)"}, svg);
+    D.forEach((d, i) => { if (i % 2 === 0) txt(svg, x(i), H - m.b + 18, lab(d), "tick", "middle"); });
+    el("line", {x1: m.l, x2: W - m.r, y1: y(0.2), y2: y(0.2), stroke: "var(--viz-axis)", "stroke-width": 1.5}, svg);
+    txt(svg, W - m.r, y(0.2) - 6, "Savant's flat price, 0.20", "note", "end");
+    const series = [{name: "First token", key: "t1", color: S1}, {name: "Second token", key: "t2", color: S2}];
+    series.forEach(s => { el("path", {d: D.map((d, i) => (i ? "L" : "M") + x(i).toFixed(1) + "," + y(d[s.key]).toFixed(1)).join(""), fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg); txt(svg, x(0) + 8, y(D[0][s.key]) - 8, s.name, "dlabel"); });
+    const cross = el("line", {y1: m.t, y2: H - m.b, stroke: "var(--viz-axis)", visibility: "hidden"}, svg);
+    const marks = series.map(s => el("circle", {r: 4, fill: s.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden"}, svg));
+    const hit = el("rect", {x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent"}, svg);
+    let idx = -1;
+    const show = i => { idx = i; cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible"); marks.forEach((c, k) => { c.setAttribute("cx", x(i)); c.setAttribute("cy", y(D[i][series[k].key])); c.setAttribute("visibility", "visible"); }); const r = svg.getBoundingClientRect(); showTip(r.left + x(i) * r.width / W, r.top + m.t, "Start of the " + lab(D[i]).replace("T", " top").replace("B", " bottom").replace(/^(\d+)/, m0 => m0 + (["1","21","31"].includes(m0) ? "st" : ["2","22"].includes(m0) ? "nd" : ["3","23"].includes(m0) ? "rd" : "th")), series.map(s => ({label: s.name, value: D[i][s.key].toFixed(3) + " runs", color: s.color}))); };
+    const hide = () => { idx = -1; cross.setAttribute("visibility", "hidden"); marks.forEach(c => c.setAttribute("visibility", "hidden")); hideTip(); };
+    hit.addEventListener("pointermove", e => { const r = svg.getBoundingClientRect(), gx = (e.clientX - r.left) * W / r.width; let b = 0, bd = 1e9; for (let i = 0; i < n; i++){ const d = Math.abs(x(i) - gx); if (d < bd){ bd = d; b = i; } } show(b); });
+    hit.addEventListener("pointerleave", hide); keyNav(svg, n, () => idx, show, hide);
+  });
+})();
+
+// 2. psychometric curve: observed bins (sized by n) + three fitted curves, direct-labeled where they separate
+(function(){
+  const fig = document.getElementById("viz-curve"), plot = fig.querySelector(".viz-plot"), D = DATA.charts.curve;
+  const colors = [S1, S2, S3], expit = z => 1 / (1 + Math.exp(-z)), f = (c, xv) => expit(c.a + c.b * xv);
+  const leg = document.getElementById("curve-legend"); leg.replaceChildren();
+  const li = (name, color, dot) => { const s = document.createElement("span"); const i = document.createElement("i"); i.style.background = color; if (dot) i.className = "dot"; s.appendChild(i); s.appendChild(document.createTextNode(name)); leg.appendChild(s); };
+  li("Observed, by bin", S1, true); D.curves.forEach((c, k) => li(c.name + (k ? "" : " curve"), colors[k]));
+  fillTable(fig, ["Edge (in)", "Pitches", "Observed", ...D.curves.map(c => c.name)], D.bins.map(b => [b.x.toFixed(2), b.n, (b.rate * 100).toFixed(1) + "%", ...D.curves.map(c => (f(c, b.x) * 100).toFixed(1) + "%")]));
+  responsive(plot, () => {
+    const W = Math.max(280, plot.clientWidth), H = 320, m = {t: 22, r: Math.min(120, Math.max(70, W * 0.2)), b: 40, l: 44}, n = D.bins.length;
+    plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
+    const x = v => m.l + (v + 4.25) / 8.5 * (W - m.l - m.r), y = v => m.t + (1 - v) * (H - m.t - m.b);
+    el("rect", {x: x(-4.25), y: m.t, width: x(0) - x(-4.25), height: H - m.t - m.b, fill: "var(--viz-wash)"}, svg);
+    txt(svg, x(-4.1), m.t + 12, "inside the ABS zone", "note"); txt(svg, x(0.15), m.t + 12, "outside", "note");
+    [0, 0.25, 0.5, 0.75, 1].forEach(v => { el("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--viz-grid)"}, svg); txt(svg, m.l - 8, y(v) + 4, Math.round(v * 100) + "%", "tick", "end"); });
+    el("line", {x1: m.l, x2: W - m.r, y1: y(0), y2: y(0), stroke: "var(--viz-axis)"}, svg);
+    [-4, -2, 0, 2, 4].forEach(v => txt(svg, x(v), H - m.b + 18, (v > 0 ? "+" : "") + v + " in", "tick", "middle"));
+    txt(svg, (m.l + W - m.r) / 2, H - 6, "true distance from the zone edge (ball edge to boundary)", "axis-label", "middle");
+    D.bins.forEach(b => el("circle", {cx: x(b.x), cy: y(b.rate), r: (3 + Math.sqrt(b.n) / 14).toFixed(1), fill: S1, "fill-opacity": 0.35, stroke: "var(--surface)", "stroke-width": 2}, svg));
+    D.curves.forEach((c, k) => { const pts = []; for (let i = 0; i <= 80; i++){ const xv = -4 + i / 10; pts.push((i ? "L" : "M") + x(xv).toFixed(1) + "," + y(f(c, xv)).toFixed(1)); } el("path", {d: pts.join(""), fill: "none", stroke: colors[k], "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}, svg); txt(svg, x(4) + 6, y(f(c, 4)) + 4, c.name, "dlabel"); });
+    const cross = el("line", {y1: m.t, y2: H - m.b, stroke: "var(--viz-axis)", visibility: "hidden"}, svg);
+    const mark = el("circle", {r: 5, fill: S1, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden"}, svg);
+    const hit = el("rect", {x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent"}, svg);
+    let idx = -1;
+    const show = i => { idx = i; const b = D.bins[i]; cross.setAttribute("x1", x(b.x)); cross.setAttribute("x2", x(b.x)); cross.setAttribute("visibility", "visible"); mark.setAttribute("cx", x(b.x)); mark.setAttribute("cy", y(b.rate)); mark.setAttribute("visibility", "visible"); const r = svg.getBoundingClientRect(); showTip(r.left + x(b.x) * r.width / W, r.top + m.t, (b.x > 0 ? "+" : "") + b.x.toFixed(2) + " in from the edge", [{label: "Observed (" + b.n.toLocaleString() + " pitches)", value: (b.rate * 100).toFixed(1) + "%", color: S1}, ...D.curves.map((c, k) => ({label: c.name, value: (f(c, b.x) * 100).toFixed(1) + "%", color: colors[k]}))]); };
+    const hide = () => { idx = -1; cross.setAttribute("visibility", "hidden"); mark.setAttribute("visibility", "hidden"); hideTip(); };
+    hit.addEventListener("pointermove", e => { const r = svg.getBoundingClientRect(), gx = (e.clientX - r.left) * W / r.width; let b = 0, bd = 1e9; D.bins.forEach((q, i) => { const d = Math.abs(x(q.x) - gx); if (d < bd){ bd = d; b = i; } }); show(b); });
+    hit.addEventListener("pointerleave", hide); keyNav(svg, n, () => idx, show, hide);
+  });
+})();
+
+// 3. judgment vs chase: one series, fitted line as a reference, quadrant guides, nearest-point hover
+(function(){
+  const fig = document.getElementById("viz-scatter"), plot = fig.querySelector(".viz-plot"), D = DATA.charts.scatter;
+  const P = D.points.slice().sort((a, b) => a.x - b.x), n = P.length;
+  responsive(plot, () => {
+    const W = Math.max(280, plot.clientWidth), H = 320, m = {t: 18, r: 18, b: 40, l: 44};
+    plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
+    const xs = P.map(p => p.x), ys = P.map(p => p.y), xlo = Math.floor(Math.min(...xs) * 2) / 2, xhi = Math.ceil(Math.max(...xs) * 2) / 2, ylo = Math.floor(Math.min(...ys) * 20) / 20, yhi = Math.ceil(Math.max(...ys) * 20) / 20;
+    const x = v => m.l + (v - xlo) / (xhi - xlo) * (W - m.l - m.r), y = v => m.t + (1 - (v - ylo) / (yhi - ylo)) * (H - m.t - m.b);
+    ticks(ylo, yhi, 5).forEach(v => { el("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: "var(--viz-grid)"}, svg); txt(svg, m.l - 8, y(v) + 4, Math.round(v * 100) + "%", "tick", "end"); });
+    ticks(xlo, xhi, 6).forEach(v => txt(svg, x(v), H - m.b + 18, (v > 0 ? "+" : "") + v, "tick", "middle"));
+    txt(svg, (m.l + W - m.r) / 2, H - 6, "challenge judgment (z; higher = sharper eyes on takes)", "axis-label", "middle");
+    el("line", {x1: x(D.x_cut), x2: x(D.x_cut), y1: m.t, y2: H - m.b, stroke: "var(--viz-axis)"}, svg);
+    el("line", {x1: m.l, x2: W - m.r, y1: y(D.y_cut), y2: y(D.y_cut), stroke: "var(--viz-axis)"}, svg);
+    txt(svg, x(D.x_cut) - 6, m.t + 12, "Eyes case", "note", "end"); txt(svg, x(D.x_cut) + 6, m.t + 12, "Approach case", "note");
+    txt(svg, W - m.r, y(D.y_cut) + 14, "top 40% chase rate above this line", "note", "end");
+    el("line", {x1: x(xlo), y1: y(D.fit.m * xlo + D.fit.b), x2: x(xhi), y2: y(D.fit.m * xhi + D.fit.b), stroke: "var(--viz-muted)", "stroke-width": 2, "stroke-linecap": "round"}, svg);
+    txt(svg, x(xhi) - 4, y(D.fit.m * xhi + D.fit.b) - 8, "fit, r = " + D.fit.r.toFixed(2), "note", "end");
+    const dots = P.map(p => el("circle", {cx: x(p.x), cy: y(p.y), r: 4, fill: S1, "fill-opacity": 0.65, stroke: "var(--surface)", "stroke-width": 2}, svg));
+    const hit = el("rect", {x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent"}, svg);
+    let idx = -1;
+    const show = i => { if (idx >= 0){ dots[idx].setAttribute("r", 4); dots[idx].setAttribute("fill-opacity", 0.65); } idx = i; const p = P[i]; dots[i].setAttribute("r", 6); dots[i].setAttribute("fill-opacity", 1); svg.appendChild(dots[i]); const r = svg.getBoundingClientRect(); showTip(r.left + x(p.x) * r.width / W, r.top + y(p.y) * r.height / H, p.name, [{label: "chase rate", value: (p.y * 100).toFixed(1) + "%"}, {label: "judgment z", value: (p.x > 0 ? "+" : "") + p.x.toFixed(2)}, {label: "challenges", value: String(p.chal)}, {label: "sort", value: p.label}]); };
+    const hide = () => { if (idx >= 0){ dots[idx].setAttribute("r", 4); dots[idx].setAttribute("fill-opacity", 0.65); } idx = -1; hideTip(); };
+    hit.addEventListener("pointermove", e => { const r = svg.getBoundingClientRect(), gx = (e.clientX - r.left) * W / r.width, gy = (e.clientY - r.top) * H / r.height; let b = -1, bd = 28 * 28; P.forEach((p, i) => { const d = (x(p.x) - gx) ** 2 + (y(p.y) - gy) ** 2; if (d < bd){ bd = d; b = i; } }); if (b < 0) hide(); else if (b !== idx) show(b); });
+    hit.addEventListener("pointerleave", hide); keyNav(svg, n, () => idx, show, hide);
+    svg.appendChild(hit);
+  });
+})();
+
+// 4. policy simulation: one series, horizontal bars, value at the tip
+(function(){
+  const fig = document.getElementById("viz-bars"), plot = fig.querySelector(".viz-plot"), D = DATA.charts.bars;
+  const names = {static: "Static rule (Savant breakeven)", dynamic: "Dynamic rule (this study)", observed: "Observed behavior", oracle: "Oracle (perfect eyes)"};
+  responsive(plot, () => {
+    const W = Math.max(280, plot.clientWidth), row = 34, m = {t: 8, r: 56, b: 28, l: Math.min(230, Math.max(120, W * 0.32))}, H = m.t + D.length * row + m.b, xMax = 120;
+    plot.replaceChildren(); const svg = el("svg", {viewBox: `0 0 ${W} ${H}`, tabindex: 0}, plot);
+    const x = v => m.l + v / xMax * (W - m.l - m.r);
+    ticks(0, xMax, 6).forEach(v => { el("line", {x1: x(v), x2: x(v), y1: m.t, y2: H - m.b, stroke: "var(--viz-grid)"}, svg); txt(svg, x(v), H - m.b + 16, String(v), "tick", "middle"); });
+    el("line", {x1: x(0), x2: x(0), y1: m.t, y2: H - m.b, stroke: "var(--viz-axis)"}, svg);
+    const bars = D.map((d, i) => { const yc = m.t + i * row + row / 2, h = 22, x0 = x(0), x1 = Math.max(x(d.runs), x0 + 4), rr = 4; txt(svg, m.l - 10, yc + 4, names[d.rule] || d.rule, "tick", "end"); const b = el("path", {d: `M${x0},${yc - h / 2}H${x1 - rr}a${rr},${rr} 0 0 1 ${rr},${rr}v${h - 2 * rr}a${rr},${rr} 0 0 1 -${rr},${rr}H${x0}Z`, fill: S1}, svg); txt(svg, x1 + 8, yc + 4, d.runs.toFixed(1), "dlabel"); return b; });
+    let idx = -1;
+    const show = i => { if (idx >= 0) bars[idx].setAttribute("fill-opacity", 1); idx = i; bars[i].setAttribute("fill-opacity", 0.8); const r = svg.getBoundingClientRect(), d = D[i]; showTip(r.left + x(d.runs) * r.width / W, r.top + (m.t + i * row) * r.height / H, names[d.rule] || d.rule, [{label: "runs per team-season", value: d.runs.toFixed(1)}, {label: "challenges per team-game", value: d.chal.toFixed(2)}, {label: "overturned", value: d.ot == null ? "" : Math.round(d.ot * 100) + "%"}]); };
+    const hide = () => { if (idx >= 0) bars[idx].setAttribute("fill-opacity", 1); idx = -1; hideTip(); };
+    bars.forEach((b, i) => { b.addEventListener("pointermove", () => { if (idx !== i) show(i); }); b.addEventListener("pointerleave", hide); });
+    keyNav(svg, D.length, () => idx, show, hide);
+  });
+})();
 </script>
 """
 
@@ -376,9 +579,6 @@ def render(data: dict, label: str) -> str:
         "@@SLOPE@@": f"{f['slope']:.2f}", "@@SLOPE_SD@@": f"{f['slope_sd']:.2f}", "@@CRIT_SD@@": f"{f['crit_sd']:.2f}",
         "@@FX_2K@@": f"{f['fixed']['two_strike']:.1f}", "@@FX_LATE@@": f"{f['fixed']['late']:.1f}",
         "@@N_TEST@@": str(next((r["n"] for r in data["eyes"] if r["outcome"] == "chase_whiff_rate"), "")),
-        "@@FIG_TOKEN@@": b64png(ROOT / "docs/figures/token_value.png"),
-        "@@FIG_SCATTER@@": b64png(ROOT / "docs/figures/judgment_vs_chase.png"),
-        "@@FIG_CURVE@@": b64png(ROOT / "docs/figures/psychometric_curve.png"),
         "@@TEAM_OPTS@@": "".join(f'<option value="{t}">{t}</option>' for t in data["teams"]),
         "@@DUGOUT_HEAD@@": "".join(f'<th class="num">{n}</th>' for n in data["stakes"]),
         "@@DUGOUT_ROWS@@": "".join(
@@ -397,7 +597,7 @@ def render(data: dict, label: str) -> str:
         "@@EYES_ROWS@@": "".join(
             f"<tr><td>{r['label']}</td><td class=\"num\">{int(r['n'])}</td><td class=\"num\">{r['beta_judgment']:+.4f}</td><td class=\"num\">{r['se_hc1']:.4f}</td><td class=\"num\">{r['p_hc1']:.2f}</td></tr>"
             for r in data["eyes"]),
-        "@@DATA@@": json.dumps({"hitters": data["hitters"]}, separators=(",", ":")),
+        "@@DATA@@": json.dumps({"hitters": data["hitters"], "charts": data["charts"]}, separators=(",", ":")),
     }
     # correlation for the sort section, from the hitters table itself
     hh = pd.DataFrame(data["hitters"])

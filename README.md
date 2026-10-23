@@ -164,6 +164,15 @@ Every chase-quality point estimate leans the wrong way (sharper eyes, slightly c
 - Geometry agrees with the ABS ruling on 99.99% of challenged pitches, with zero disagreements within a quarter inch.
 - End-of-game token state matches the official ledger in 99.84% of games under the ledger's accounting; the per-inning extras top-up explains all 74 zero-token challenges.
 
+## Club brief
+
+`scripts/11_club_brief.py` turns the processed tables into a single self-contained page for coaches and front offices, in `report/`:
+
+- `club_brief_2026.html` is the web version (publish it as a shareable page).
+- `club_brief_2026_standalone.html` opens locally and can be attached to an email.
+
+Part one is for the dugout: when to spend a token (thresholds by inning, tokens held and stake, in percent and in inches for an average eye), per-hitter challenge cards with a team selector (challenges, overturns, eyes and criterion percentiles, and the perceived margin each hitter should want before challenging early, mid-game and in the ninth), and the eyes-versus-approach sort. Part two is the evidence: the psychometric curve, reliability by challenge volume, the policy simulation, the test results, and methods. Every table names the processed file it came from, so the page regenerates on a new season with `scripts/run_pipeline.sh` followed by this script.
+
 ## Limits
 
 - One season of ABS. Year-over-year stability of the judgment score cannot be measured until 2027; split-half reliability within 2026 is reported instead.

@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 
 tests/_feed_cache/
+src/*.egg-info/

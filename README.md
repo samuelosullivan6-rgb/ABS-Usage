@@ -237,6 +237,18 @@ The ± figures are robust standard errors. The 2025-to-2026 result survives and 
 
 Part one is for the dugout: when to spend a token (thresholds by inning, tokens held and stake, in percent and in inches for an average eye), per-hitter challenge cards with a team selector (challenges, overturns, the eyes score as a percentile range of plus or minus one posterior SD, the criterion percentile, and the perceived margin each hitter should want before challenging early, mid-game and in the ninth), and the eyes-versus-approach sort. The sort assigns "Eyes case" and "Approach case" only from the challenge count at which the slope's reliability clears 0.5 at the lower end of its interval (`reliability_checks_mlb_2026.csv`); in 2026 no volume does, so no hitter gets either label, and high-chase hitters are sorted on the criterion instead ("free with tokens" or "sparing with tokens"). Part two is the evidence: the psychometric curve, reliability by challenge volume, the policy simulation with paired standard errors and noise draws, the belief-model comparison and the σ table, the test results, and methods. The brief generator refuses to write a page that shows nan, None or undefined outside script code. Every table names the processed file it came from, so the page regenerates on a new season with `scripts/run_pipeline.sh` followed by this script.
 
+### What a club can act on now
+
+Part one of the brief opens with facts that need no model, counted from the feeds with every pitch's true location (`first_actions` in `scripts/11_club_brief.py`). "Runs left" prices each unchallenged umpire miss at its stake: an upper bound, since no one can see every miss, but the same yardstick for every team.
+
+- Batters challenged 19% of the 11,992 true balls called strikes while they held a token, leaving about 40 runs per team-season; catchers challenged 32% of 10,444 true strikes called balls, leaving 32. Teams ranged from 12% to 26% of their hitters' misses challenged.
+- The high strike is the one to challenge. Umpires call strikes on 49% of takes in the first inch above the ABS box, against 40% off the side and 40% below it, and hitters challenge only 15% of high misses against 26% of low ones. The box's top sits below the zone umpires call.
+- Strike three on a true ball went unchallenged 0.14 times per team-game with a token in hand (688 in the season, 7.3 runs per team-season).
+- Of the 2,438 batter challenges that lost, the median was 1.2 inches inside the zone, and 36% were low pitches against 25% of all decisions: hitters over-challenge low and under-challenge high.
+- Hitters challenged 15% of misses in the first inch outside the box, 23% in the second and 31% beyond, leaving 25, 11 and 4 runs per team-season; the second inch is where knowing the box pays most.
+
+The token-value guidance that follows it rests on the calibrated belief model and a noise level that is an upper bound (see the sensitivity table), so a club should act on the facts above first and read the thresholds as the direction of the correction, not its size.
+
 ## Limits
 
 - One season of ABS. Year-over-year stability of the judgment score cannot be measured until 2027; split-half reliability within 2026 is reported instead.

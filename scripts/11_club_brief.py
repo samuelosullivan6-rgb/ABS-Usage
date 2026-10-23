@@ -21,7 +21,7 @@ from scipy.stats import norm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from abs_judgment.config import PROCESSED, ROOT  # noqa: E402
 from abs_judgment.judgment import EDGE_WINDOW_IN, build_decision_table, eyes_label_threshold  # noqa: E402
-from abs_judgment.policy import interp_belief, perceived_margin  # noqa: E402
+from abs_judgment.policy import attach_stakes, interp_belief, perceived_margin  # noqa: E402
 
 LOGIT_TO_PROBIT = 1.7
 STAKES = [("0-0 count, bases empty", 0.05), ("typical pitch", 0.19), ("3-2 count, runners on", 0.50)]
@@ -44,13 +44,65 @@ def b64png(p: Path) -> str:
     return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()
 
 
+def first_actions(pt: pd.DataFrame, st: pd.DataFrame, n_games: int) -> dict:
+    """Model-free facts about the umpire's misses: which ones went unchallenged with a
+    token in hand, by side of the box, distance and count, and what they were worth.
+    "Runs left" counts every unchallenged miss at its stake: an upper bound, since no
+    one can see every miss, but one that needs no belief about anyone's eyes."""
+    tok_b = pt["bat_tokens_before_ruleB"] if "bat_tokens_before_ruleB" in pt else pt["bat_tokens_before"]
+    tok_f = pt["fld_tokens_before_ruleB"] if "fld_tokens_before_ruleB" in pt else pt["fld_tokens_before"]
+    dx = pt.mid_x.abs() * 12 - 8.5
+    da = (pt.mid_z - pt.sz_top) * 12
+    db = (pt.sz_bot - pt.mid_z) * 12
+    nd = pd.DataFrame({"side": dx, "above": da, "below": db})
+    ok = nd.notna().all(axis=1)
+    near = pd.Series("side", index=pt.index, dtype=object)
+    near[ok] = nd[ok].idxmax(axis=1)
+    d = pd.Series(np.where((dx > 0) & ((da > 0) | (db > 0)), "corner", near), index=pt.index).where(ok)
+    stake = pd.Series(np.abs(attach_stakes(pt, st)), index=pt.index)
+    per = 162 / (2 * n_games)
+    out = {}
+    for side, mask, chal in (("bat", pt.orig_called_strike & (pt.abs_edge_in > 0) & (tok_b >= 1), pt.batter_challenged),
+                             ("fld", pt.orig_called_ball & (pt.abs_edge_in <= 0) & (tok_f >= 1), pt.fielder_challenged)):
+        m = pt[mask.fillna(False).astype(bool)]
+        c = chal[m.index].astype(bool)
+        sv = stake[m.index]
+        dd = d[m.index]
+        row = {"misses": int(len(m)), "chal_rate": float(c.mean()), "runs_left": float(sv[~c].sum() * per),
+               "per_game": float(len(m) / (2 * n_games)),
+               "by_dir": {k: {"misses": int((dd == k).sum()), "chal_rate": float(c[dd == k].mean()),
+                              "runs_left": float(sv[(dd == k) & ~c].sum() * per)} for k in ("above", "below", "side", "corner")}}
+        edge = m.abs_edge_in.abs()
+        row["by_edge"] = {k: {"misses": int(mm.sum()), "chal_rate": float(c[mm].mean()), "runs_left": float(sv[mm & ~c].sum() * per)}
+                          for k, mm in (("0-1", edge <= 1), ("1-2", (edge > 1) & (edge <= 2)), ("2+", edge > 2))}
+        two = m.strikes_before == 2
+        row["two_strike"] = {"misses": int(two.sum()), "chal_rate": float(c[two].mean()),
+                             "unchallenged": int((two & ~c).sum()), "unchallenged_per_game": float((two & ~c).sum() / (2 * n_games)),
+                             "runs_left": float(sv[two & ~c].sum() * per)}
+        out[side] = row
+    lost = pt[pt.batter_challenged.astype(bool) & ~pt.challenge_overturned.fillna(False).astype(bool)]
+    dec = pt[(pt.orig_called_strike & (tok_b >= 1) & (pt.abs_edge_in.abs() <= 4)).fillna(False).astype(bool)]
+    out["lost_bat"] = {"n": int(len(lost)), "median_in": float(lost.abs_edge_in.abs().median()),
+                       "share_below": float((d[lost.index] == "below").mean()), "dec_share_below": float((d[dec.index] == "below").mean())}
+    tk = pt[((pt.orig_called_strike | pt.orig_called_ball) & ok).astype(bool)]
+    e, dirs, cs = tk.abs_edge_in, d[tk.index], tk.orig_called_strike.astype(bool)
+    out["ump"] = {k: {"0-1": float(cs[(dirs == k) & (e > 0) & (e <= 1)].mean()), "1-2": float(cs[(dirs == k) & (e > 1) & (e <= 2)].mean())}
+                  for k in ("above", "below", "side")}
+    bm = pt[(pt.orig_called_strike & (pt.abs_edge_in > 0) & (tok_b >= 1)).fillna(False).astype(bool)]
+    tr = pt.batter_challenged[bm.index].astype(bool).groupby(bm.bat_team).mean()
+    out["team_rate"] = {"min": float(tr.min()), "max": float(tr.max()), "median": float(tr.median()), "n": int(len(tr))}
+    return out
+
+
 def build_data(label: str) -> dict:
     season = label.split("_")[1]
     pt = pd.read_parquet(PROCESSED / f"pitch_table_{label}.parquet",
                          columns=["batter_id", "half", "home_team", "away_team", "orig_called_strike",
                                   "bat_tokens_before", "bat_tokens_before_ruleB", "abs_edge_in", "batter_challenged",
                                   "strikes_before", "balls_before", "inning", "bat_score", "fld_score",
-                                  "mid_x", "mid_z", "sz_top", "sz_bot"])
+                                  "mid_x", "mid_z", "sz_top", "sz_bot", "orig_called_ball", "fld_tokens_before",
+                                  "fld_tokens_before_ruleB", "fielder_challenged", "challenge_overturned",
+                                  "outs_before", "base_state", "bat_team"])
     pt["bat_abbr"] = np.where(pt.half == "top", pt.away_team, pt.home_team)
     team = pt.groupby("batter_id").bat_abbr.agg(lambda s: s.mode().iloc[0] if s.notna().any() else "")
     nteams = pt.groupby("batter_id").bat_abbr.nunique()
@@ -60,6 +112,7 @@ def build_data(label: str) -> dict:
 
     ch = pd.read_parquet(PROCESSED / f"challenges_{label}.parquet")
     gs = pd.read_csv(PROCESSED / f"game_summaries_{label}.csv")
+    first = first_actions(pt, pd.read_csv(PROCESSED / f"stakes_{label}.csv"), int(gs.game_pk.nunique()))
     bat = ch[ch.initiator_role == "batter"].groupby("initiator_id").agg(chal=("is_overturned", "size"), won=("is_overturned", "sum"))
     roles = ch.groupby("initiator_role").is_overturned.agg(["size", "mean"])
 
@@ -237,7 +290,7 @@ def build_data(label: str) -> dict:
             "token_first_start": dv(1, 1), "token_second_start": dv(1, 2), "token_first_9th": dv(17, 1),
             "belief": belief, "r_chase": float(np.corrcoef(refh.judgment_z, refh.chase_rate)[0, 1]), "n_r_chase": int(len(refh)),
         },
-        "guide": guide, "seeds": seed_rows, "sens": sens_rows,
+        "guide": guide, "seeds": seed_rows, "sens": sens_rows, "first": first,
         "dugout": dugout, "stakes": [n for n, _ in STAKES], "teams": teams, "hitters": hitters, "label_counts": counts,
         "sim": sim_rows, "eyes": eyes_rows, "rel": rel_rows, "yoy": yoy_row,
     }
@@ -354,9 +407,24 @@ a{color:var(--accent)}
   <h1>ABS challenge judgment</h1>
   <p class="lede">What the challenge system reveals about a hitter's eyes, when a token is worth spending, and how to tell an eyes problem from an approach problem. Part one is for the dugout. Part two is the evidence.</p>
   <nav class="sticky" aria-label="Sections">
-    <a href="#spend">Spend a token</a><a href="#cards">Hitter cards</a><a href="#sort">Eyes or approach</a><a href="#study">The study</a><a href="#methods">Methods</a>
+    <a href="#first">What to do first</a><a href="#spend">Spend a token</a><a href="#cards">Hitter cards</a><a href="#sort">Eyes or approach</a><a href="#study">The study</a><a href="#methods">Methods</a>
   </nav>
 </header>
+
+<section id="first">
+  <div class="part">Part one · for the dugout</div>
+  <h2>What to do first</h2>
+  <p>Before any model: where the umpire's misses went unchallenged in @@SEASON@@, counted straight from the feeds with the true location of every pitch. These numbers need no belief about anyone's eyes. "Runs left" prices every unchallenged miss at its stake, an upper bound since no one can see every miss, but the same yardstick for every team.</p>
+  <ol class="rules">
+    <li><span><b>Challenge more.</b> Batters challenged @@B_CHAL@@% of the @@B_MISSES@@ true balls called strikes while they held a token, leaving about @@B_RUNS@@ runs per team-season; catchers challenged @@F_CHAL@@% of @@F_MISSES@@ true strikes called balls, leaving @@F_RUNS@@. Every one of those is a call the system would have flipped. Teams ranged from @@T_MIN@@% to @@T_MAX@@% of their hitters' misses challenged (median @@T_MED@@%).</span></li>
+    <li><span><b>The high strike is the one to challenge.</b> Umpires call strikes on @@U_ABOVE_01@@% of takes in the first inch above the ABS box, against @@U_SIDE_01@@% off the side and @@U_BELOW_01@@% below it, so a high called strike is the likeliest to be an ABS ball. Hitters challenge only @@B_ABOVE_CHAL@@% of high misses against @@B_BELOW_CHAL@@% of low ones. The box's top sits below the zone umpires call; tell hitters that in those words.</span></li>
+    <li><span><b>Strike three on a true ball went unchallenged @@B_2K_PER_GAME@@ times per team-game</b> with a token in hand (@@B_2K_N@@ in the season, @@B_2K_RUNS@@ runs per team-season). Two-strike misses carry the biggest stakes on this page; a two-strike take that looked like a ball should always be asked about.</span></li>
+    <li><span><b>Stop challenging pitches that were strikes by an inch or more.</b> Of the @@L_N@@ batter challenges that lost, the median was @@L_MED@@ inches inside the zone, and @@L_BELOW@@% were low pitches against @@L_DEC_BELOW@@% of all decisions: hitters over-challenge low and under-challenge high.</span></li>
+    <li><span><b>Beyond two inches the miss is visible; inside an inch it mostly is not.</b> Hitters challenged @@B_E01@@% of misses in the first inch, @@B_E12@@% in the second and @@B_E2@@% beyond that, leaving @@B_R01@@, @@B_R12@@ and @@B_R2@@ runs per team-season. The second inch is where a hitter who knows the box can gain the most.</span></li>
+  </ol>
+  <div class="tablebox"><table id="first-table"><thead><tr><th>Side of the box</th><th class="num">Umpire strike rate, first inch outside</th><th class="num">Batter misses</th><th class="num">Challenged</th><th class="num">Runs left per team-season</th><th class="num">Catcher misses</th><th class="num">Challenged</th><th class="num">Runs left</th></tr></thead><tbody>@@FIRST_ROWS@@</tbody></table></div>
+  <p class="src">Umpire-called strikes that the ABS box says were balls (batter side) and called balls that were strikes (catcher side), with a token in hand under the extra-innings top-up rule; stakes from stakes_@@LABEL@@.csv. Source: pitch_table_@@LABEL@@.parquet.</p>
+</section>
 
 <section id="spend">
   <div class="part">Part one · for the dugout</div>
@@ -751,7 +819,27 @@ def render(data: dict, label: str) -> str:
     league_sig = round(f["sigma_league"], 2)
     token_vals = [d["t1"] for d in data["charts"]["token"]]
     bars = data["charts"]["bars"]
+    F = data["first"]
+    pct = lambda v: f"{v * 100:.0f}"  # noqa: E731
+    dir_names = {"above": "Above", "below": "Below", "side": "Off the plate", "corner": "Corner"}
+    first_rows = "".join(
+        f"<tr><td>{dir_names[k]}</td><td class=\"num\">{pct(F['ump'][k]['0-1']) + '%' if k in F['ump'] else ''}</td>"
+        f"<td class=\"num\">{F['bat']['by_dir'][k]['misses']:,}</td><td class=\"num\">{pct(F['bat']['by_dir'][k]['chal_rate'])}%</td><td class=\"num\">{F['bat']['by_dir'][k]['runs_left']:.1f}</td>"
+        f"<td class=\"num\">{F['fld']['by_dir'][k]['misses']:,}</td><td class=\"num\">{pct(F['fld']['by_dir'][k]['chal_rate'])}%</td><td class=\"num\">{F['fld']['by_dir'][k]['runs_left']:.1f}</td></tr>"
+        for k in ("above", "below", "side", "corner"))
     rep = {
+        "@@B_CHAL@@": pct(F["bat"]["chal_rate"]), "@@B_MISSES@@": f"{F['bat']['misses']:,}", "@@B_RUNS@@": f"{F['bat']['runs_left']:.0f}",
+        "@@F_CHAL@@": pct(F["fld"]["chal_rate"]), "@@F_MISSES@@": f"{F['fld']['misses']:,}", "@@F_RUNS@@": f"{F['fld']['runs_left']:.0f}",
+        "@@T_MIN@@": pct(F["team_rate"]["min"]), "@@T_MAX@@": pct(F["team_rate"]["max"]), "@@T_MED@@": pct(F["team_rate"]["median"]),
+        "@@U_ABOVE_01@@": pct(F["ump"]["above"]["0-1"]), "@@U_SIDE_01@@": pct(F["ump"]["side"]["0-1"]), "@@U_BELOW_01@@": pct(F["ump"]["below"]["0-1"]),
+        "@@B_ABOVE_CHAL@@": pct(F["bat"]["by_dir"]["above"]["chal_rate"]), "@@B_BELOW_CHAL@@": pct(F["bat"]["by_dir"]["below"]["chal_rate"]),
+        "@@B_2K_PER_GAME@@": f"{F['bat']['two_strike']['unchallenged_per_game']:.2f}", "@@B_2K_N@@": f"{F['bat']['two_strike']['unchallenged']:,}",
+        "@@B_2K_RUNS@@": f"{F['bat']['two_strike']['runs_left']:.1f}",
+        "@@L_N@@": f"{F['lost_bat']['n']:,}", "@@L_MED@@": f"{F['lost_bat']['median_in']:.1f}", "@@L_BELOW@@": pct(F["lost_bat"]["share_below"]),
+        "@@L_DEC_BELOW@@": pct(F["lost_bat"]["dec_share_below"]),
+        "@@B_E01@@": pct(F["bat"]["by_edge"]["0-1"]["chal_rate"]), "@@B_E12@@": pct(F["bat"]["by_edge"]["1-2"]["chal_rate"]), "@@B_E2@@": pct(F["bat"]["by_edge"]["2+"]["chal_rate"]),
+        "@@B_R01@@": f"{F['bat']['by_edge']['0-1']['runs_left']:.1f}", "@@B_R12@@": f"{F['bat']['by_edge']['1-2']['runs_left']:.1f}", "@@B_R2@@": f"{F['bat']['by_edge']['2+']['runs_left']:.1f}",
+        "@@FIRST_ROWS@@": first_rows,
         "@@SEASON@@": data["season"], "@@LABEL@@": label,
         "@@GAMES@@": f"{f['games']:,}", "@@CHALLENGES@@": f"{f['challenges']:,}",
         "@@TOK1@@": f"{f['token_first_start']:.2f}", "@@TOK2@@": f"{f['token_second_start']:.2f}", "@@TOK9@@": f"{f['token_first_9th']:.2f}",

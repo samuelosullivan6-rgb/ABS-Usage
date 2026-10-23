@@ -109,9 +109,24 @@ a{color:var(--accent)}
   <h1>ABS challenge judgment</h1>
   <p class="lede">What the challenge system reveals about a hitter's eyes, when a token is worth spending, and how to tell an eyes problem from an approach problem. Part one is for the dugout. Part two is the evidence.</p>
   <nav class="sticky" aria-label="Sections">
-    <a href="#spend">Spend a token</a><a href="#cards">Hitter cards</a><a href="#sort">Eyes or approach</a><a href="#study">The study</a><a href="#methods">Methods</a>
+    <a href="#first">What to do first</a><a href="#spend">Spend a token</a><a href="#cards">Hitter cards</a><a href="#sort">Eyes or approach</a><a href="#study">The study</a><a href="#methods">Methods</a>
   </nav>
 </header>
+
+<section id="first">
+  <div class="part">Part one · for the dugout</div>
+  <h2>What to do first</h2>
+  <p>Before any model: where the umpire's misses went unchallenged in 2026, counted straight from the feeds with the true location of every pitch. These numbers need no belief about anyone's eyes. "Runs left" prices every unchallenged miss at its stake, an upper bound since no one can see every miss, but the same yardstick for every team.</p>
+  <ol class="rules">
+    <li><span><b>Challenge more.</b> Batters challenged 19% of the 11,992 true balls called strikes while they held a token, leaving about 40 runs per team-season; catchers challenged 32% of 10,444 true strikes called balls, leaving 32. Every one of those is a call the system would have flipped. Teams ranged from 12% to 26% of their hitters' misses challenged (median 20%).</span></li>
+    <li><span><b>The high strike is the one to challenge.</b> Umpires call strikes on 49% of takes in the first inch above the ABS box, against 40% off the side and 40% below it, so a high called strike is the likeliest to be an ABS ball. Hitters challenge only 15% of high misses against 26% of low ones. The box's top sits below the zone umpires call; tell hitters that in those words.</span></li>
+    <li><span><b>Strike three on a true ball went unchallenged 0.14 times per team-game</b> with a token in hand (688 in the season, 7.3 runs per team-season). Two-strike misses carry the biggest stakes on this page; a two-strike take that looked like a ball should always be asked about.</span></li>
+    <li><span><b>Stop challenging pitches that were strikes by an inch or more.</b> Of the 2,438 batter challenges that lost, the median was 1.2 inches inside the zone, and 36% were low pitches against 25% of all decisions: hitters over-challenge low and under-challenge high.</span></li>
+    <li><span><b>Beyond two inches the miss is visible; inside an inch it mostly is not.</b> Hitters challenged 15% of misses in the first inch, 23% in the second and 31% beyond that, leaving 25.2, 10.6 and 4.5 runs per team-season. The second inch is where a hitter who knows the box can gain the most.</span></li>
+  </ol>
+  <div class="tablebox"><table id="first-table"><thead><tr><th>Side of the box</th><th class="num">Umpire strike rate, first inch outside</th><th class="num">Batter misses</th><th class="num">Challenged</th><th class="num">Runs left per team-season</th><th class="num">Catcher misses</th><th class="num">Challenged</th><th class="num">Runs left</th></tr></thead><tbody><tr><td>Above</td><td class="num">49%</td><td class="num">2,696</td><td class="num">15%</td><td class="num">9.1</td><td class="num">1,778</td><td class="num">30%</td><td class="num">5.7</td></tr><tr><td>Below</td><td class="num">40%</td><td class="num">2,894</td><td class="num">26%</td><td class="num">9.0</td><td class="num">2,778</td><td class="num">38%</td><td class="num">7.3</td></tr><tr><td>Off the plate</td><td class="num">40%</td><td class="num">5,643</td><td class="num">17%</td><td class="num">19.8</td><td class="num">4,940</td><td class="num">33%</td><td class="num">14.7</td></tr><tr><td>Corner</td><td class="num"></td><td class="num">759</td><td class="num">27%</td><td class="num">2.5</td><td class="num">948</td><td class="num">13%</td><td class="num">3.9</td></tr></tbody></table></div>
+  <p class="src">Umpire-called strikes that the ABS box says were balls (batter side) and called balls that were strikes (catcher side), with a token in hand under the extra-innings top-up rule; stakes from stakes_mlb_2026.csv. Source: pitch_table_mlb_2026.parquet.</p>
+</section>
 
 <section id="spend">
   <div class="part">Part one · for the dugout</div>

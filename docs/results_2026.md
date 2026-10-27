@@ -8,7 +8,7 @@ A public measurement of a hitter's eyes, stripped of intent, built from the 2026
 1. **A dynamic challenge policy.** The value of a held token priced by backward induction over the game, replacing Baseball Savant's constant 0.2-run price, with a per-player layer that turns each hitter's measured perception into a perceived-margin rule.
 2. **The eyes-versus-approach test.** A hitter's chases are either a perception problem (pitch-recognition training) or an approach problem (a count plan). Challenge judgment on takes is the only public signal of perception with no swing in it. The test asks whether, among hitters with similar chase rates, poor location-adjusted challenge judgment predicts costlier chases, worse two-strike contact, and weaker year-over-year chase improvement. Judgment enters as a covariate pooled across hitters, so the per-hitter estimate need only be unbiased, not precise.
 
-The decision link for the second is the hitting coordinator's development plan. The design is in [docs/research_design.md](docs/research_design.md). The data verification is in [docs/data_findings_2026-10-21.md](docs/data_findings_2026-10-21.md).
+The decision link for the second is the hitting coordinator's development plan. The design is in [research_design.md](research_design.md). The data verification is in [data_findings_2026-10-21.md](data_findings_2026-10-21.md).
 
 ## What the data turned out to support
 
@@ -66,7 +66,7 @@ All tables are in `data/processed/`; figures in `docs/figures/`. Sample: 2,429 g
 
 ### The psychometric curve
 
-![challenge judgment curve](docs/figures/psychometric_curve.png)
+![challenge judgment curve](figures/psychometric_curve.png)
 
 Hitters faced 65,940 called strikes with a token in hand from four inches inside the zone edge to six outside and challenged 7.1% of them (95 of those pitches lie beyond four inches, and 39 of them were challenged). The umpire was wrong on 18% of those pitches. The league curve rises smoothly from under 1% at four inches inside the zone to about 40% at three and a half inches outside, and then stops rising: 41% of the pitches four to six inches outside were challenged, where the fitted logit says 62%. It is a curve, not a step: at the edge itself hitters challenge only 11 to 14% of true balls. Two strikes shift the criterion by 1.9 logits (strike three is worth challenging), three balls by 0.5, a second token in hand by 0.2, the seventh inning onward by 0.7.
 
@@ -109,7 +109,7 @@ The earlier model is the one published before 2026-10-23: no direction, a diagon
 
 ### Token value and the dynamic policy
 
-![token value](docs/figures/token_value.png)
+![token value](figures/token_value.png)
 
 Opportunities (taken pitches within three inches of the edge, both sides) arrive 1.34 times per team-half-inning played and the umpire misses 20% of them. The league judgment slope implies perceptual noise of about 2.7 inches (an upper bound, decision 9; 2.63 before the direction-aware refit, 2.71 after). A simulated challenger perceives the true edge plus that noise and believes the call will flip with the calibrated probability P(flip | perceived edge), a logit fit on the opportunities with the same noise draw (decision 17). That belief knows the umpire is right on four near-edge calls in five; in every quintile it is within 0.3 points of the true flip rate.
 
@@ -163,7 +163,7 @@ Under the flat prior the conclusion was insensitive to σ and entirely driven by
 
 ### The eyes-versus-approach test
 
-![judgment vs chase](docs/figures/judgment_vs_chase.png)
+![judgment vs chase](figures/judgment_vs_chase.png)
 
 Sample: 221 hitters with 60+ decisions, 8+ challenges and 150+ PA. Every number in this section is from the direction-aware score; the before-and-after record is at the end of the section.
 

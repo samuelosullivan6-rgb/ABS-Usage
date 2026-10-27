@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from tqdm import tqdm  # noqa: E402
 
-from abs_judgment.config import PROCESSED, SEASONS  # noqa: E402
+from abs_judgment.config import POSTSEASON, PROCESSED, SEASONS  # noqa: E402
 from abs_judgment.statsapi import feed_path, fetch_feed, list_games  # noqa: E402
 
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
@@ -27,10 +27,13 @@ def main() -> None:
     ap.add_argument("--season", type=int, required=True)
     ap.add_argument("--sport", type=int, default=1)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--postseason", action="store_true", help="Wild Card through World Series; outputs carry _post")
+    ap.add_argument("--end", default=None, help="last date to include (postseason only; default: the config end)")
     a = ap.parse_args()
 
-    cfg = SEASONS[(a.season, a.sport)]
-    games = list_games(cfg["start"], cfg["end"], sport_id=a.sport, game_type=cfg["game_type"])
+    cfg = POSTSEASON[a.season] if a.postseason else SEASONS[(a.season, a.sport)]
+    end = a.end if (a.postseason and a.end) else cfg["end"]
+    games = list_games(cfg["start"], end, sport_id=a.sport, game_type=cfg["game_type"])
     import pandas as pd
 
     pd.DataFrame(games).to_csv(PROCESSED / f"games_{cfg['label']}.csv", index=False)

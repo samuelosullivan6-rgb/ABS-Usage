@@ -19,7 +19,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from abs_judgment.config import PROCESSED, RAW_STATCAST, SEASONS  # noqa: E402
+from abs_judgment.config import POSTSEASON, PROCESSED, RAW_STATCAST, RAW_STATCAST_POST, SEASONS  # noqa: E402
 from abs_judgment.savant import load_statcast_days  # noqa: E402
 from abs_judgment.statsapi import extract_many, feed_path  # noqa: E402
 from abs_judgment.zone import edge_distance_in_np, midplate_location_np  # noqa: E402
@@ -48,9 +48,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--season", type=int, required=True)
     ap.add_argument("--sport", type=int, default=1)
+    ap.add_argument("--postseason", action="store_true", help="build the _post tables from games_<label>_post.csv")
     a = ap.parse_args()
-    cfg = SEASONS[(a.season, a.sport)]
+    cfg = POSTSEASON[a.season] if a.postseason else SEASONS[(a.season, a.sport)]
     label = cfg["label"]
+    sc_dir, sc_glob = (RAW_STATCAST_POST, "*.csv") if a.postseason else (RAW_STATCAST, f"{a.season}-*.csv")
     rep: list[str] = [f"# build report {label}"]
 
     games = pd.read_csv(PROCESSED / f"games_{label}.csv")
@@ -109,7 +111,7 @@ def main() -> None:
 
     # ---- Statcast join (MLB only) --------------------------------------------
     if a.sport == 1:
-        days = sorted(RAW_STATCAST.glob(f"{a.season}-*.csv"))
+        days = sorted(sc_dir.glob(sc_glob))
         sc = load_statcast_days(days)
         rep.append(f"statcast days {len(days)}, rows {len(sc):,}")
         sc = sc[[c for c in SC_KEEP if c in sc.columns]].copy()
